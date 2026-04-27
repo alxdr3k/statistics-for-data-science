@@ -57,3 +57,4 @@ htmlcov/
 # Environment files
 .env
 .env.local
+.scratch/
