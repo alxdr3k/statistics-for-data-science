@@ -17,7 +17,7 @@
 | 02 | `02-spread-variance-std.md` · `.ipynb` | 분산·표준편차 — 얼마나 퍼져 있는가 | ⏳ |
 | 03 | `03-tukey-and-visuals.md` · `.ipynb` | 박스플롯과 Tukey 의 그림 | ⏳ |
 | 04 | `exercises.ipynb` | 모듈 연습 문제 | ⏳ |
-| 05 | [`reflection.md`](reflection.md) | 모듈 회고 | ✅ |
+| — | [`reflection.md`](reflection.md) | 모듈 회고 (챕터 완료 후 작성) | ✅ |
 
 작성되지 않은 챕터는 단계적으로 추가됩니다. `01` 만 끝내도 다음 모듈로 넘어가는 데 무리는 없습니다.
 

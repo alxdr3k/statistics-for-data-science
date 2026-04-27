@@ -36,10 +36,19 @@
 
 ## 모듈 간 의존성
 
-```
-0 ──▶ 1 ──▶ 2 ──▶ 3 ──▶ 4 ──▶ 5 ──▶ 6 ──▶ 7 ──▶ 8
-                              └──────────▶ 9
-                                          └▶ 10
+```mermaid
+graph LR
+    M0[0 Orientation] --> M1[1 Descriptive]
+    M1 --> M2[2 Probability]
+    M2 --> M3[3 Distributions]
+    M3 --> M4[4 Sampling & CLT]
+    M4 --> M5[5 Estimation & CI]
+    M5 --> M6[6 Hypothesis Testing]
+    M6 --> M7[7 Correlation & Regression]
+    M6 --> M8[8 ANOVA & Categorical]
+    M5 --> M9[9 Bayesian Thinking]
+    M7 --> M10[10 Statistics for ML]
+    M9 --> M10
 ```
 
 - 1~6 은 직선적으로 따라가는 것이 가장 효과적.
