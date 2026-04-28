@@ -56,7 +56,7 @@
 
 ### 1. Dense와 Embedding
 
-Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. <a id="ref-20-embedding"></a>[Embedding](#note-20-embedding)은 단어, 사용자, 상품 같은 범주를 연속 벡터로 바꿔 의미적 관계를 학습한다.
+Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. Embedding은 단어, 사용자, 상품 같은 범주를 연속 벡터로 바꿔 의미적 관계를 학습한다.
 
 ![Dense Layer 구조](assets/dense-layer-547.png)
 
@@ -72,7 +72,7 @@ Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. <a id="ref
 
 ### 3. RNN, LSTM, GRU
 
-<a id="ref-20-rnn"></a>[RNN](#note-20-rnn)은 순서 데이터를 처리하지만 긴 의존성을 잘 보존하기 어렵다. <a id="ref-20-lstm"></a>[LSTM](#note-20-lstm)과 <a id="ref-20-gru"></a>[GRU](#note-20-gru)는 게이트 구조로 어떤 정보를 유지하고 버릴지 조절한다.
+RNN은 순서 데이터를 처리하지만 긴 의존성을 잘 보존하기 어렵다. LSTM과 GRU는 게이트 구조로 어떤 정보를 유지하고 버릴지 조절한다.
 
 ![RNN의 순환 구조](assets/rnn-intuition-558.png)
 
@@ -80,7 +80,7 @@ Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. <a id="ref
 
 ### 4. 보조 레이어
 
-<a id="ref-20-dropout"></a>[Dropout](#note-20-dropout)은 과적합을 줄이고, <a id="ref-20-pooling"></a>[Pooling](#note-20-pooling)은 공간 크기를 줄이며, Batch Normalization은 학습 안정화와 연결된다.
+Dropout은 과적합을 줄이고, Pooling은 공간 크기를 줄이며, Batch Normalization은 학습 안정화와 연결된다.
 
 ![Dropout의 직관](assets/dropout-566.png)
 
@@ -143,9 +143,3 @@ Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. <a id="ref
 
 - <a id="note-20-dense"></a>[Dense](#ref-20-dense): 이전 층의 모든 입력이 현재 층의 모든 뉴런과 연결되는 층. 이름: 모든 입력과 뉴런이 빽빽하게 연결된 층이다.
 - <a id="note-20-cnn"></a>[CNN](#ref-20-cnn): 필터로 지역 패턴을 찾는 합성곱 신경망.
-- <a id="note-20-embedding"></a>[Embedding](#ref-20-embedding): 범주를 연속 벡터로 바꾸는 층. 이름: 범주를 의미 있는 연속 벡터 공간에 심는다는 뜻이다.
-- <a id="note-20-rnn"></a>[RNN](#ref-20-rnn): 이전 상태를 다음 계산에 사용하는 순환 신경망.
-- <a id="note-20-lstm"></a>[LSTM](#ref-20-lstm): 장기 정보를 보존하기 위한 게이트 구조 RNN.
-- <a id="note-20-gru"></a>[GRU](#ref-20-gru): LSTM보다 단순한 게이트 구조 RNN.
-- <a id="note-20-dropout"></a>[Dropout](#ref-20-dropout): 학습 중 일부 뉴런을 무작위로 제외하는 기법. 이름: 일부 뉴런을 잠시 떨어뜨려 의존을 줄인다.
-- <a id="note-20-pooling"></a>[Pooling](#ref-20-pooling): 영역별 대표값으로 정보를 압축하는 연산.

@@ -68,7 +68,7 @@
 
 ### 2. k-means와 k-medoids
 
-<a id="ref-16-k-means"></a>[k-means](#note-16-k-means)는 <a id="ref-16-평균"></a>[평균](#note-16-평균) 중심을 쓰고 유클리디언 거리에 적합하다. <a id="ref-16-k-medoids"></a>[k-medoids](#note-16-k-medoids)는 실제 데이터 대표점을 쓰며 다양한 거리 <a id="ref-16-척도"></a>[척도](#note-16-척도)에 더 유연하다.
+k-means는 <a id="ref-16-평균"></a>[평균](#note-16-평균) 중심을 쓰고 유클리디언 거리에 적합하다. k-medoids는 실제 데이터 대표점을 쓰며 다양한 거리 <a id="ref-16-척도"></a>[척도](#note-16-척도)에 더 유연하다.
 
 k를 고를 때는 elbow 방법이나 <a id="ref-16-실루엣"></a>[실루엣](#note-16-실루엣) 점수를 참고한다. 실루엣은 같은 군집 안에서는 얼마나 가깝고, 다른 군집과는 얼마나 떨어져 있는지를 함께 본다. 다만 점수가 높아도 업무적으로 해석하기 어려운 군집이면 좋은 결과라고 보기 어렵다.
 
@@ -86,7 +86,7 @@ k를 고를 때는 elbow 방법이나 <a id="ref-16-실루엣"></a>[실루엣](#
 
 ### 4. 계층적 군집화와 DBSCAN
 
-계층적 군집화는 합쳐지는 구조를 보고, <a id="ref-16-dbscan"></a>[DBSCAN](#note-16-dbscan)은 밀도가 높은 곳을 군집으로 본다. DBSCAN은 <a id="ref-16-이상치"></a>[이상치](#note-16-이상치) 탐지에도 유용하다.
+계층적 군집화는 합쳐지는 구조를 보고, DBSCAN은 밀도가 높은 곳을 군집으로 본다. DBSCAN은 <a id="ref-16-이상치"></a>[이상치](#note-16-이상치) 탐지에도 유용하다.
 
 ![DBSCAN 학습 절차](assets/dbscan-learning-448.png)
 
@@ -150,12 +150,9 @@ k-means는 k를 사용자가 정해야 한다. elbow나 silhouette은 참고 도
 - <a id="note-16-군집화"></a>[군집화](#ref-16-군집화): 정답 없이 비슷한 데이터끼리 묶는 방법.
 - <a id="note-16-거리-척도"></a>[거리 척도](#ref-16-거리-척도): 두 데이터가 얼마나 다른지 재는 규칙.
 - <a id="note-16-변수"></a>[변수](#ref-16-변수): 관측 대상의 특징을 적어 둔 열. ([처음 설명된 차시](../01-data-understanding/README.md#4-단위-변수-관측치))
-- <a id="note-16-k-means"></a>[k-means](#ref-16-k-means): k개 중심에 가장 가까운 점들을 묶는 군집화.
 - <a id="note-16-평균"></a>[평균](#ref-16-평균): 모든 값을 더해 개수로 나눈 대표값. ([처음 설명된 차시](../04-statistics-probability/README.md#4-중심-경향))
-- <a id="note-16-k-medoids"></a>[k-medoids](#ref-16-k-medoids): 실제 데이터 대표점을 중심으로 쓰는 군집화.
 - <a id="note-16-척도"></a>[척도](#ref-16-척도): 값을 어떤 규칙과 수준으로 측정했는지 나타내는 기준. ([처음 설명된 차시](../01-data-understanding/README.md#5-변수의-역할과-척도))
 - <a id="note-16-실루엣"></a>[실루엣](#ref-16-실루엣): 같은 군집과 다른 군집의 거리 차이로 군집 품질을 보는 지표.
 - <a id="note-16-분포"></a>[분포](#ref-16-분포): 값들이 어떤 모양으로 흩어져 있는지 나타내는 구조. ([처음 설명된 차시](../05-probability-distributions/README.md#1-확률변수와-분포))
-- <a id="note-16-dbscan"></a>[DBSCAN](#ref-16-dbscan): 밀도가 높은 지역을 군집으로 찾는 방법.
 - <a id="note-16-이상치"></a>[이상치](#ref-16-이상치): 전체 흐름에서 유난히 튀는 값. ([처음 설명된 차시](../02-data-cleaning/README.md#4-이상치의-의미))
 - <a id="note-16-gmm"></a>[GMM](#ref-16-gmm): 각 군집을 가우시안 분포로 보는 확률적 군집화.

@@ -43,7 +43,7 @@
 
 ## 이 차시에서 꼭 붙잡을 설명 방식
 
-<a id="ref-21-sgd"></a>[SGD](#note-21-sgd)의 손실이 매번 부드럽게 내려가지 않는 이유는 매번 일부 <a id="ref-21-표본"></a>[표본](#note-21-표본)만 보기 때문이다. 작은 <a id="ref-21-배치"></a>[배치](#note-21-배치)는 계산이 빠르고 자주 업데이트하지만 방향이 noisy하다. 큰 배치는 안정적이지만 느리고 메모리를 많이 쓴다. 그래서 <a id="ref-21-미니배치"></a>[미니배치](#note-21-미니배치)가 절충안으로 자주 쓰인다.
+<a id="ref-21-sgd"></a>[SGD](#note-21-sgd)의 손실이 매번 부드럽게 내려가지 않는 이유는 매번 일부 <a id="ref-21-표본"></a>[표본](#note-21-표본)만 보기 때문이다. 작은 배치는 계산이 빠르고 자주 업데이트하지만 방향이 noisy하다. 큰 배치는 안정적이지만 느리고 메모리를 많이 쓴다. 그래서 미니배치가 절충안으로 자주 쓰인다.
 
 ## 핵심 이론
 
@@ -58,7 +58,7 @@
 
 Batch GD는 전체 데이터를 보고 한 번 업데이트한다. SGD는 표본 하나 또는 작은 묶음으로 업데이트한다. Mini-batch는 안정성과 속도 사이의 절충이다.
 
-<a id="ref-21-에폭"></a>[에폭](#note-21-에폭)은 전체 훈련 데이터를 한 번 모두 사용한 단위다. 같은 에폭 수라도 배치 크기가 작으면 업데이트 횟수가 많아지고, 배치 크기가 크면 업데이트 횟수가 줄어든다.
+에폭은 전체 훈련 데이터를 한 번 모두 사용한 단위다. 같은 에폭 수라도 배치 크기가 작으면 업데이트 횟수가 많아지고, 배치 크기가 크면 업데이트 횟수가 줄어든다.
 
 ![경사하강법 리뷰](assets/gradient-review-576.png)
 
@@ -70,7 +70,7 @@ Batch GD는 전체 데이터를 보고 한 번 업데이트한다. SGD는 표본
 
 ### 2. Momentum과 NAG
 
-<a id="ref-21-momentum"></a>[Momentum](#note-21-momentum)은 이전 방향의 관성을 더해 좁은 골짜기에서 흔들림을 줄인다. <a id="ref-21-nag"></a>[NAG](#note-21-nag)는 먼저 가볼 위치의 기울기를 보고 보정한다.
+Momentum은 이전 방향의 관성을 더해 좁은 골짜기에서 흔들림을 줄인다. NAG는 먼저 가볼 위치의 기울기를 보고 보정한다.
 
 ![NAG의 미리 보는 기울기](assets/nag-587.png)
 
@@ -78,7 +78,7 @@ Batch GD는 전체 데이터를 보고 한 번 업데이트한다. SGD는 표본
 
 ### 3. Adagrad, RMSProp, Adadelta
 
-<a id="ref-21-adagrad"></a>[Adagrad](#note-21-adagrad)는 자주 업데이트된 파라미터의 학습률을 줄인다. <a id="ref-21-rmsprop"></a>[RMSProp](#note-21-rmsprop)은 최근 기울기 제곱 <a id="ref-21-평균"></a>[평균](#note-21-평균)을 사용해 Adagrad의 과도한 감소 문제를 완화한다. <a id="ref-21-adadelta"></a>[Adadelta](#note-21-adadelta)도 같은 문제의식에서 출발해 업데이트 크기가 지나치게 작아지는 현상을 줄이려는 방법이다.
+Adagrad는 자주 업데이트된 파라미터의 학습률을 줄인다. RMSProp은 최근 기울기 제곱 <a id="ref-21-평균"></a>[평균](#note-21-평균)을 사용해 Adagrad의 과도한 감소 문제를 완화한다. Adadelta도 같은 문제의식에서 출발해 업데이트 크기가 지나치게 작아지는 현상을 줄이려는 방법이다.
 
 ![Adagrad의 학습률 조절](assets/adagrad-590.png)
 
@@ -153,14 +153,6 @@ Adagrad는 자주 등장하지 않는 특징의 학습률을 상대적으로 크
 
 - <a id="note-21-sgd"></a>[SGD](#ref-21-sgd): 일부 표본으로 기울기를 추정해 업데이트하는 방식.
 - <a id="note-21-표본"></a>[표본](#ref-21-표본): 전체 대신 관찰한 일부 대상. ([처음 설명된 차시](../04-statistics-probability/README.md#2-모집단과-표본))
-- <a id="note-21-배치"></a>[배치](#ref-21-배치): 한 번에 묶어 계산하는 데이터 단위.
-- <a id="note-21-미니배치"></a>[미니배치](#ref-21-미니배치): 여러 표본을 작은 묶음으로 나눠 학습하는 방식.
-- <a id="note-21-에폭"></a>[에폭](#ref-21-에폭): 전체 훈련 데이터를 한 번 모두 사용한 학습 단위.
-- <a id="note-21-momentum"></a>[Momentum](#ref-21-momentum): 이전 이동 방향을 일부 유지하는 관성 기법. 이름: 관성이다. 이전 이동 방향을 일부 유지한다.
-- <a id="note-21-nag"></a>[NAG](#ref-21-nag): 미리 이동해 볼 위치에서 기울기를 보는 모멘텀 개선법.
-- <a id="note-21-adagrad"></a>[Adagrad](#ref-21-adagrad): 파라미터별 누적 기울기에 따라 학습률을 조정하는 방법.
-- <a id="note-21-rmsprop"></a>[RMSProp](#ref-21-rmsprop): 최근 기울기 크기를 기준으로 학습률을 조정하는 방법. 이름: root mean square propagation의 줄임말로, 최근 기울기 제곱 평균을 이용한다.
 - <a id="note-21-평균"></a>[평균](#ref-21-평균): 모든 값을 더해 개수로 나눈 대표값. ([처음 설명된 차시](../04-statistics-probability/README.md#4-중심-경향))
-- <a id="note-21-adadelta"></a>[Adadelta](#ref-21-adadelta): 누적 기울기 문제를 줄이도록 Adagrad를 보완한 방법. 이름: delta, 즉 변화량을 조절한다는 이름처럼 업데이트 크기를 안정화하려는 방법이다.
 - <a id="note-21-adam"></a>[Adam](#ref-21-adam): 모멘텀과 적응형 학습률을 결합한 최적화 방법. 이름: Adaptive Moment Estimation의 줄임말로, 모멘텀과 적응형 학습률을 함께 쓴다.
 - <a id="note-21-하이퍼파라미터"></a>[하이퍼파라미터](#ref-21-하이퍼파라미터): 모델이 학습하기 전에 사람이 정하는 설정. ([처음 설명된 차시](../18-generalization-techniques/README.md#1-하이퍼파라미터-탐색))
