@@ -1,6 +1,6 @@
 ---
 name: dev-cycle
-description: "전체 개발 사이클: pull → doc 정합성 감사(codex) → 구현 → verify → review → ship. 플래그: --loop [N], --phase <id>"
+description: "전체 개발 사이클: pull → 구현 후보 탐색(codex) → 구현 → verify → review → ship. 플래그: --loop [N], --phase <id>"
 ---
 
 # Dev Cycle
@@ -9,13 +9,13 @@ description: "전체 개발 사이클: pull → doc 정합성 감사(codex) → 
 
 - `--loop` : 한 사이클 완료 후 Step 1부터 자동 재시작. Step 3에서 **ALL CLEAR** 반환 시 종료. (총 8단계)
 - `--loop N` : 정확히 N회 반복 후 종료 (ALL CLEAR 무관).
-- `--phase <id>` : 구현 대상을 프로젝트 로드맵의 특정 Phase로 한정한다. `<id>`는 프로젝트 문서에 있는 식별자를 그대로 전달한다 (예: `"Judgment System 1B"`, `TASK-011`, `"orchestrator Phase 4"`). 파싱하거나 변환하지 않는다. Step 2(doc 감사)와 Step 4(구현) 양쪽에서 이 id를 참고해 범위를 좁힌다.
+- `--phase <id>` : 구현 대상을 프로젝트 로드맵의 특정 Phase로 한정한다. `<id>`는 프로젝트 문서에 있는 식별자를 그대로 전달한다 (예: `"Judgment System 1B"`, `TASK-011`, `"orchestrator Phase 4"`). 파싱하거나 변환하지 않는다. Step 2(구현 후보 탐색)와 Step 4(구현) 양쪽에서 이 id를 참고해 범위를 좁힌다.
 
 ---
 
 ## 실행 원칙
 
-**각 단계가 완료되면 사용자 입력 없이 즉시 다음 단계로 진행한다.** 스킬(verify, codex:rescue 등)이 완료되어 제어가 돌아와도 멈추지 않는다. 중간 결과를 보고하며 대기하지 않는다.
+**각 단계가 완료되면 사용자 입력 없이 즉시 다음 단계로 진행한다.** 커맨드나 스킬(verify, `/codex:rescue` 등)이 완료되어 제어가 돌아와도 멈추지 않는다. 중간 결과를 보고하며 대기하지 않는다.
 
 멈추는 경우는 아래뿐이다:
 - Step 3에서 **ALL CLEAR** 반환
@@ -137,48 +137,61 @@ git checkout -  # 원래 브랜치로 복귀
 
 ---
 
-## Step 2 — 문서 정합성 감사 (codex:rescue 위임)
+## Step 2 — 구현 후보 탐색 (`/codex:rescue` 위임)
 
-`codex:rescue` 스킬을 호출하여 다음 프롬프트를 전달하라.
-**반드시 이전 codex 스레드를 이어받지 말고 새 세션으로 시작할 것** (`--no-continue` 또는 새 스레드 옵션 명시).
+slash command로 `/codex:rescue --fresh --wait` 를 실행하여 다음 프롬프트를 전달하라.
+
+- `--fresh`: 이전 Codex rescue thread를 이어받지 않고 새 thread로 시작한다.
+- `--wait`: foreground로 완료까지 기다린다.
+- 금지: `Skill(codex:rescue)`, `Skill(codex:codex-rescue)`, `codex:codex-rescue` 직접 호출.
+  `codex:codex-rescue`는 `/codex:rescue` 내부 subagent 이름이다.
 
 `--phase <id>` 가 지정된 경우, 프롬프트에 "구현 대상: `<id>`" 를 명시하여 codex가 해당 Phase 범위에 집중하도록 한다.
 
 ---
 
-이 리포지토리의 문서와 구현 상태의 정합성을 감사하고, 다음 작업을 식별하라.
+이 리포지토리의 문서, 로드맵, 코드, 테스트를 근거로 다음에 구현할 작업을 식별하라.
+문서는 구현 의도를 파악하기 위한 입력이며, 선택된 구현 작업의 acceptance criteria에
+필요한 문서 정합성 복구를 포함한다. 단, 구현 후보가 있는데 문서 수정만 하는 사이클로
+빠지지 마라.
 
 **수행 절차:**
 
-1. 모든 문서 파일을 읽어라 (README.md, CLAUDE.md, ARCHITECTURE.md, docs/**, 기타 문서 파일)
+1. repo guidance, README, roadmap, architecture/testing docs 중 핵심 문서만 읽어라.
 2. 현재 구현 상태를 파악하라:
    - `git log --oneline -30`으로 최근 커밋 흐름 확인
    - 주요 소스 디렉토리 및 파일 탐색
-3. 문서와 코드 사이의 불일치를 식별하라:
-   - 문서에 있지만 미구현된 기능
-   - 구현되었지만 문서에 없는 기능
-   - 오래되거나 잘못된 설명
-4. TODO, 미완성 구현, 개선 가능한 부분에서 다음 작업을 도출하라
+   - 관련 테스트와 TODO 탐색
+3. 구현 후보를 우선 식별하라:
+   - 문서/로드맵에 있지만 미구현된 기능
+   - 미완성 구현, TODO, 알려진 버그, 테스트 공백
+   - 구현은 있지만 검증/문서 갱신이 필요한 기능
+4. 문서 불일치는 구현 후보 판단과 acceptance criteria의 근거로 사용한다.
+   - 문서가 맞고 코드가 부족하면 **구현 작업**이다.
+   - 코드가 맞고 문서만 오래됐으면 **문서 작업**이다.
+   - 구현과 문서가 둘 다 필요하면 **구현 작업**으로 반환하고 문서 갱신을 acceptance criteria에 포함한다.
+   - 구현 도중 문서가 더 틀어질 수 있는 항목은 Step 4/5에서 같이 갱신하도록 명시한다.
+5. 다음 작업을 하나 도출하라.
    - `--phase <id>` 가 지정된 경우, 해당 Phase 범위의 작업만 도출한다
 
 **반환 형식 — 아래 중 정확히 하나를 선택:**
 
-**## DOC FIX NEEDED**
-[파일명과 수정 내용을 포함한 구체적인 불일치 목록. Claude가 바로 실행 가능한 프롬프트 형태로 작성.]
-
 **## NEXT TASK**
-[다음 구현할 기능이나 개선 작업의 명확한 프롬프트. 충분한 컨텍스트 포함.]
+[다음 구현할 기능, 버그 수정, 테스트 보강, 또는 코드 개선 작업의 명확한 프롬프트. 파일/영역, acceptance criteria, 필요한 문서 갱신, 필요한 검증 포함.]
+
+**## DOC FIX NEEDED**
+[구현할 코드 작업이 없고 문서만 틀렸을 때만 선택. 파일명과 수정 내용을 포함한 구체적인 문서 수정 목록.]
 
 **## ALL CLEAR**
-[현재 상태 요약. 추가 작업 없음.]
+[구현 작업도 문서 수정도 없을 때만 선택. 현재 상태 요약.]
 
 ---
 
 ## Step 3 — 결과 판단 (Claude 실행)
 
 - **ALL CLEAR:** 사용자에게 현재 상태를 보고하고 중단한다.
-- **DOC FIX NEEDED:** Step 4로 진행, 작업 유형은 `docs`
 - **NEXT TASK:** Step 4로 진행, 작업 유형은 codex가 반환한 내용에 따라 결정
+- **DOC FIX NEEDED:** 구현 후보가 없고 문서만 틀린 경우에만 Step 4로 진행, 작업 유형은 `docs`
 
 ---
 
@@ -196,12 +209,24 @@ git checkout -  # 원래 브랜치로 복귀
 `--phase <id>` 가 지정된 경우, 해당 프로젝트 Phase에 해당하는 작업만 구현한다. 범위를 벗어난 작업은 하지 않는다.
 
 Step 2에서 받은 프롬프트(DOC FIX NEEDED 또는 NEXT TASK)를 실행한다.
+`NEXT TASK`인 경우 코드/테스트 변경을 우선 완료하되, Step 2가 명시한 문서 갱신은
+같은 사이클 안에서 함께 처리한다.
 
 ---
 
 ## Step 5 — Verify (Claude 실행)
 
 `/verify` 커맨드를 실행한다.
+검증에는 구현 요구사항뿐 아니라 Step 2/4에서 식별한 문서 갱신 acceptance criteria도
+포함한다. 구현 완료 후 관련 thin docs가 실제 코드와 맞는지 확인하고 누락 시 같은
+사이클에서 수정한다.
+
+`/verify`가 완료되어 제어가 돌아오면 사용자 입력을 기다리지 말고 즉시 아래 기준으로
+분기한다:
+
+- verify가 pass이면 Step 6으로 진행한다.
+- verify가 누락을 수정했다면 수정 결과를 확인하고 Step 6으로 진행한다.
+- verify가 해결 불가 blocker를 보고했을 때만 사용자에게 blocker를 보고하고 멈춘다.
 
 ---
 
