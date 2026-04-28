@@ -1,7 +1,6 @@
 ---
 name: dev-cycle
-description: 전체 개발 사이클: pull → doc 정합성 감사(codex) → 구현 → verify → review → ship
-argument-hint: [--loop [N]] [--phase <id>]
+description: "전체 개발 사이클: pull → doc 정합성 감사(codex) → 구현 → verify → review → ship. 플래그: --loop [N], --phase <id>"
 ---
 
 # Dev Cycle
