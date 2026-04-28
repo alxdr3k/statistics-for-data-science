@@ -1,3 +1,0 @@
-actwyn
-concluv
-statistics-for-data-science

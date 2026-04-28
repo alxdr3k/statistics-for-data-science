@@ -28,7 +28,11 @@ argument-hint: [--loop [N]] [--phase <id>]
 ## 리포지토리 유형 정의
 
 **Direct-push 리포 (main에 직접 커밋/push):**
-목록은 `.claude/direct-push-repos.txt` 에서 관리된다. Phase 시작 전 해당 파일을 읽어 현재 리포가 포함되어 있는지 확인한다.
+- actwyn
+- concluv
+- statistics-for-data-science
+
+리포 이름이 위 목록에 있으면 Direct-push 리포로 취급한다.
 
 그 외 모든 리포는 **Standard 리포** (feat/* → dev → main PR 워크플로우).
 
@@ -57,7 +61,8 @@ git checkout -  # 원래 브랜치로 복귀
 
 ## Phase 2 — 문서 정합성 감사 (codex:rescue 위임)
 
-`codex:rescue` 스킬을 호출하여 다음 프롬프트를 전달하라:
+`codex:rescue` 스킬을 호출하여 다음 프롬프트를 전달하라.
+**반드시 이전 codex 스레드를 이어받지 말고 새 세션으로 시작할 것** (`--no-continue` 또는 새 스레드 옵션 명시).
 
 ---
 
