@@ -233,8 +233,9 @@ Direct-push diff 기준:
 
 루프 절차:
 
-1. 현재 diff를 리뷰한다. Direct-push는 위 "Direct-push diff 기준"을 따르고,
-   Standard 리포는 `$REVIEW_BASE...HEAD` 기준으로 리뷰한다.
+1. 현재 diff를 리뷰한다. Direct-push는 위 "Direct-push diff 기준"을 따른다.
+   dirty worktree는 현재 세션에서 직접 리뷰하고, unpublished commit만 ref 기반
+   review를 사용한다. Standard 리포는 `$REVIEW_BASE...HEAD` 기준으로 리뷰한다.
 2. actionable finding이 있으면 수정하고 관련 테스트를 실행한다.
 3. 최대 5회 반복한다.
 4. 5회 초과 후에도 남은 항목은 GitHub issue로 남기고 Step 7로 진행한다.
