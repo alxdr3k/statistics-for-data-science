@@ -29,7 +29,7 @@ datasets/
 | 상태 | ID | 도메인 | 출처 | 라이선스 | 사용 모듈 | 비고 |
 |------|-----|--------|------|----------|----------|------|
 | ✅ 동봉 | `health/sleep_synth.csv` | 건강 | 학습용 합성 데이터 | MIT (이 저장소) | 1 | 본 저장소에서 생성한 합성 수면 데이터. 분포의 비대칭성을 보여 주기 위해 한 모집단에 양극 분포를 섞었다. |
-| 🔜 노트북 다운로드 | `content/movielens_small` | 콘텐츠 | [GroupLens — MovieLens](https://grouplens.org/datasets/movielens/) | non-commercial research only | 1, 2, 7 | 다운로드 스크립트로 받음. 노트북에서 100k 또는 1M 버전을 사용. |
+| ⏳ 모듈 7 추가 예정 | `content/movielens_small` | 콘텐츠 | [GroupLens — MovieLens](https://grouplens.org/datasets/movielens/) | non-commercial research only | 7 | 회귀·평점 분석 챕터에서 사용 예정. 현재 모듈 1·2는 합성 데이터 사용. |
 | ⏳ 모듈 3 추가 예정 | `health/nhanes_subset` | 건강 | [CDC NHANES](https://www.cdc.gov/nchs/nhanes/) | 미국 공공 도메인 | 3, 4, 5 | 신장·체중·수면·혈압 등 대표 변수만 발췌. 원본은 `raw/` 에. |
 | ⏳ 모듈 6 추가 예정 | `content/spotify_audio_features` | 콘텐츠 | [Spotify Web API · Audio Features](https://developer.spotify.com/documentation/web-api/) | API 약관 (조회만) | 6, 7 | 사용자 토큰으로 직접 조회한 결과를 학습자 본인이 캐싱. |
 | ⏳ 모듈 6 추가 예정 | `health/fitness_logs_synth.csv` | 건강 | 학습용 합성 데이터 | MIT (이 저장소) | 6, 7 | 운동 강도·심박수·소모 칼로리 합성. |

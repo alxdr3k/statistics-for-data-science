@@ -13,7 +13,7 @@
 | 0 | Orientation | 학습 방법, 도구 투어, 환경 검증 | ✅ |
 | 1 | Descriptive Statistics | 평균이 거짓말할 때 / 분산·표준편차·IQR / Tukey 시각화 / 연습 | ✅ |
 | 2 | Probability Foundations | 확률의 직관 / 조건부확률·베이즈 / 독립성 함정 | ✅ |
-| 3 | Distributions | 베르누이→이항→포아송 / 정규의 의사결정 의미 / t·χ²·F 가 등장하는 이유 | ✅ |
+| 3 | Distributions | 베르누이→이항→포아송→정규 / t·χ²·F 가 등장하는 이유 | ✅ |
 | 4 | Sampling & CLT | 표본 vs 모집단 / 표본분포 / CLT 가 왜 통계학의 기둥인가 | ⏳ |
 
 ### Track B — 추론
@@ -78,4 +78,4 @@ graph LR
 2. `notebooks_template.ipynb` 를 복사해 노트북 시작.
 3. `PEDAGOGY.md` 의 7-블록 구조를 그대로 따른다.
 4. *체크리스트* 를 모두 만족시킨다 (`PEDAGOGY.md` 끝부분 참고).
-5. PR 머지 정책: `feat/* → main` (squash).
+5. PR 머지 정책: `feat/* → main` squash merge.
