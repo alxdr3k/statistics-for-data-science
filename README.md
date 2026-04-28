@@ -10,8 +10,9 @@ PDF 강의자료의 22차시 구성을 따라가되, **데이터 사이언스를
 
 1. 전체 흐름을 먼저 봅니다: [CURRICULUM.md](CURRICULUM.md)
 2. 학습 방식과 작성 기준을 확인합니다: [PEDAGOGY.md](PEDAGOGY.md)
-3. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
-4. 현재 작성된 자료는 [modules/README.md](modules/README.md)에서 1~22차시 전체를 확인할 수 있습니다.
+3. 누적 개념 사전을 옆에 둡니다: [GLOSSARY.md](GLOSSARY.md)
+4. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
+5. 현재 작성된 자료는 [modules/README.md](modules/README.md)에서 1~22차시 전체를 확인할 수 있습니다.
 
 ## 현재 구성
 
@@ -20,6 +21,7 @@ statistics-for-data-science/
 ├── README.md
 ├── CURRICULUM.md
 ├── PEDAGOGY.md
+├── GLOSSARY.md
 ├── modules/
 │   ├── 00-orientation/
 │   ├── 01-data-understanding/
