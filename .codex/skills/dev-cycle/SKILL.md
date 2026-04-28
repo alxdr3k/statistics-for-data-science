@@ -68,8 +68,7 @@ echo "Review base: $REVIEW_BASE"
 - 현재 브랜치에 PR이 있으면 그 PR의 base branch를 사용한다.
 - PR이 없고 `origin/dev`가 있으면 `dev`를 사용한다.
 - 둘 다 없으면 원격 default branch를 사용하고, 감지 실패 시 `main`으로 fallback한다.
-- Claude plugin 환경에서 `/codex:review` 또는 `/codex:adversarial-review`를 호출할 때는
-  계산된 base를 `--base <branch>`로 명시한다.
+- 코드 리뷰 도구를 호출할 때는 계산된 base를 `--base <branch>`로 명시한다.
 
 ## Step 1 - Sync
 
@@ -96,7 +95,7 @@ echo "Review base: $REVIEW_BASE"
 
 읽기 순서:
 
-1. `AGENTS.md`, `CLAUDE.md`, README, repo-local guidance 중 존재하는 파일
+1. `AGENTS.md`, README, repo-local guidance 중 존재하는 파일
 2. `docs/ARCHITECTURE.md`, `docs/CODE_MAP.md`, `docs/TESTING.md` 등 얇은 핵심 문서
 3. task/phase와 직접 관련된 소스, 테스트, 문서
 

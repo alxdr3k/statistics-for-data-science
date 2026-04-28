@@ -61,6 +61,6 @@ Each plan item must be small enough that its execution won't approach response o
 ## Constraints
 
 - **Scope discipline**: address review items only. No drive-by refactors, no speculative cleanup.
-- **Project conventions**: respect `AGENTS.md`, `CLAUDE.md`, and existing repo guidance/code style when present. If a review item conflicts with a project rule, flag it and follow the rule.
+- **Project conventions**: respect `AGENTS.md` and existing repo guidance/code style when present. If a review item conflicts with a project rule, flag it and follow the rule.
 - **Commits**: do not commit unless the review or project workflow explicitly requests it. If commits are expected, pair test + implementation per the project's TDD rules.
 - **Secrets / destructive ops**: never fix a review item by weakening a security check, skipping hooks, or force-pushing.
