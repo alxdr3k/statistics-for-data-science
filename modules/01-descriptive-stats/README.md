@@ -19,8 +19,6 @@
 | 04 | [`exercises.ipynb`](exercises.ipynb) | 모듈 연습 문제 | ✅ |
 | — | [`reflection.md`](reflection.md) | 모듈 회고 (챕터 완료 후 작성) | ✅ |
 
-작성되지 않은 챕터는 단계적으로 추가됩니다. `01` 만 끝내도 다음 모듈로 넘어가는 데 무리는 없습니다.
-
 ## 권장 흐름
 
-`README → 01-when-mean-lies (md → ipynb) → 회고 → 다음 챕터` 순서. 한 챕터 60~90 분.
+`README → 01 (md → ipynb) → 02 (md → ipynb) → 03 (md → ipynb) → exercises → reflection` 순서. 한 챕터 60~90 분.

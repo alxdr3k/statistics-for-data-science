@@ -81,7 +81,7 @@ statistics-for-data-science/
 
 새 챕터 작성 워크플로우는 [`PEDAGOGY.md`](PEDAGOGY.md) 의 *체크리스트* 와 [`CURRICULUM.md`](CURRICULUM.md) 의 *콘텐츠 추가 워크플로우* 를 참고하세요. 핵심:
 
-- `feat/<topic>` 브랜치에서 작업 → `dev` 로 squash merge → `main` 으로 merge.
+- `feat/<topic>` 브랜치에서 작업 → `main` 으로 squash merge (PR 필수).
 - `notebooks_template.ipynb` 를 복사해서 노트북 시작.
 - 7-블록 구조와 회고 질문 3 개를 빠뜨리지 않을 것.
 
