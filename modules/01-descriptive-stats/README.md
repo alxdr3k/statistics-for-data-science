@@ -14,9 +14,9 @@
 | 순서 | 파일 | 무엇 | 상태 |
 |------|------|------|------|
 | 01 | [`01-when-mean-lies.md`](01-when-mean-lies.md) · [`.ipynb`](01-when-mean-lies.ipynb) | 평균이 거짓말할 때 — 중심을 측정하는 세 가지 방식 | ✅ |
-| 02 | `02-spread-variance-std.md` · `.ipynb` | 분산·표준편차 — 얼마나 퍼져 있는가 | ⏳ |
-| 03 | `03-tukey-and-visuals.md` · `.ipynb` | 박스플롯과 Tukey 의 그림 | ⏳ |
-| 04 | `exercises.ipynb` | 모듈 연습 문제 | ⏳ |
+| 02 | [`02-spread-variance-std.md`](02-spread-variance-std.md) · [`.ipynb`](02-spread-variance-std.ipynb) | 분산·표준편차·IQR — 얼마나 퍼져 있는가 | ✅ |
+| 03 | [`03-tukey-and-visuals.md`](03-tukey-and-visuals.md) · [`.ipynb`](03-tukey-and-visuals.ipynb) | 박스플롯과 Tukey 의 그림 | ✅ |
+| 04 | [`exercises.ipynb`](exercises.ipynb) | 모듈 연습 문제 | ✅ |
 | — | [`reflection.md`](reflection.md) | 모듈 회고 (챕터 완료 후 작성) | ✅ |
 
 작성되지 않은 챕터는 단계적으로 추가됩니다. `01` 만 끝내도 다음 모듈로 넘어가는 데 무리는 없습니다.
