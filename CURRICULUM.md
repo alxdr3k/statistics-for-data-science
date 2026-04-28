@@ -50,4 +50,4 @@
 
 ## 학습자료 위치
 
-작성 완료 상태와 현재 학습 진입점은 [modules/README.md](modules/README.md)에서 확인합니다. 현재 본문 작성은 2차시까지 완료했습니다.
+작성 완료 상태와 현재 학습 진입점은 [modules/README.md](modules/README.md)에서 확인합니다. 현재 본문 작성은 4차시까지 완료했습니다.

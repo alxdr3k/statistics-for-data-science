@@ -4,14 +4,14 @@ PDF 강의자료의 22차시 구성을 따라가되, **데이터 사이언스를
 
 이 자료의 기준은 “많이 아는 사람에게 압축해서 설명하기”가 아닙니다. 처음 보는 용어를 하나씩 풀고, 쉬운 예시로 이해한 뒤, PDF의 개념 이름과 연결하는 방식으로 작성합니다.
 
-현재 실제 학습자료 본문은 **2일차(2차시 데이터 정제)** 까지 작성했습니다. 나머지 차시는 커리큘럼 설계만 잡아 두었습니다.
+현재 실제 학습자료 본문은 **4일차(4차시 통계와 확률)** 까지 작성했습니다. 나머지 차시는 커리큘럼 설계만 잡아 두었습니다.
 
 ## 여기서 시작
 
 1. 전체 흐름을 먼저 봅니다: [CURRICULUM.md](CURRICULUM.md)
 2. 학습 방식과 작성 기준을 확인합니다: [PEDAGOGY.md](PEDAGOGY.md)
 3. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
-4. 현재 작성된 자료는 [1차시 데이터의 이해](modules/01-data-understanding/README.md)와 [2차시 데이터 정제](modules/02-data-cleaning/README.md)입니다.
+4. 현재 작성된 자료는 [1차시 데이터의 이해](modules/01-data-understanding/README.md), [2차시 데이터 정제](modules/02-data-cleaning/README.md), [3차시 데이터 변환](modules/03-data-transformation/README.md), [4차시 통계와 확률](modules/04-statistics-probability/README.md)입니다.
 
 ## 현재 구성
 
@@ -24,6 +24,8 @@ statistics-for-data-science/
 │   ├── 00-orientation/
 │   ├── 01-data-understanding/
 │   ├── 02-data-cleaning/
+│   ├── 03-data-transformation/
+│   ├── 04-statistics-probability/
 │   └── README.md
 ├── archive/practical-first-v1/
 │   └── modules/        # 이전 실습형 자료 보존본
@@ -35,6 +37,8 @@ statistics-for-data-science/
 ## 학습 원칙
 
 - 새 용어는 **일상적인 말 → 쉬운 예시 → 정확한 용어** 순서로 설명합니다.
+- 결론만 말하지 않고, **왜 그런 결론이 나오는지**를 자세히 설명합니다.
+- 영어 용어는 번역만 하지 않고, **왜 그런 이름이 붙었는지**를 먼저 풉니다.
 - 차트와 도식은 관련 설명 바로 옆에 둡니다.
 - 실습은 보조입니다. 먼저 “이 말이 무슨 뜻인지” 이해하는 것이 우선입니다.
 - 어려운 내용은 `심화`로 표시하고, 첫 학습 때는 건너뛰어도 되게 만듭니다.
