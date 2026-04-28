@@ -1,7 +1,7 @@
 [project]
 name = "statistics-for-data-science"
 version = "0.1.0"
-description = "데이터 과학을 위한 통계학 학습 저장소 — 시나리오 기반 7-블록 학습"
+description = "Data Science Lv3 심화이론 학습 저장소"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }

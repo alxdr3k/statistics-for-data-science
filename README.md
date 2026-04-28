@@ -1,93 +1,60 @@
-# Statistics for Data Science
+# Data Science Lv3 심화이론
 
-데이터 과학에 필요한 통계학을 **"왜 필요한가, 어디서 쓰이는가"** 부터 납득하며 다지는 학습 저장소.
+PDF 강의자료의 22차시 구성을 바탕으로 다시 작성하는 **데이터 사이언스 심화 이론 학습 저장소**입니다. 기존 자료가 실습 중심이었다면, 현재 버전은 개념의 전제, 수식의 의미, 모델 선택 기준, 오해와 반례를 먼저 다룹니다.
 
----
+현재 실제 학습자료 본문은 요청 범위에 맞춰 **2일차(2차시 데이터 정제)** 까지 작성했습니다. 나머지 차시는 커리큘럼 설계만 잡아 두었습니다.
 
 ## 여기서 시작
 
-처음 클론한 직후 다음 순서대로 따라가면 30~60 분 안에 첫 학습이 시작됩니다.
+1. 전체 흐름을 먼저 봅니다: [CURRICULUM.md](CURRICULUM.md)
+2. 학습 방식과 난이도 기준을 확인합니다: [PEDAGOGY.md](PEDAGOGY.md)
+3. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
+4. 현재 작성된 자료는 [1차시 데이터의 이해](modules/01-data-understanding/README.md)와 [2차시 데이터 정제](modules/02-data-cleaning/README.md)입니다.
 
-1. **환경 셋업**
-   - macOS: [`SETUP/macos.md`](SETUP/macos.md)
-   - Windows: [`SETUP/windows.md`](SETUP/windows.md)
-   - (선택) VS Code 사용: [`SETUP/vscode.md`](SETUP/vscode.md)
-2. **환경 검증**
-   - JupyterLab 또는 VS Code 에서 [`modules/00-orientation/03-check-env.ipynb`](modules/00-orientation/03-check-env.ipynb) 의 모든 셀이 에러 없이 실행되는지 확인.
-3. **학습 방법 익히기**
-   - [`modules/00-orientation/01-how-to-learn.md`](modules/00-orientation/01-how-to-learn.md) — 이 저장소를 어떻게 읽고, 어떻게 회고할지.
-   - [`modules/00-orientation/02-tools-tour.ipynb`](modules/00-orientation/02-tools-tour.ipynb) — Pandas·NumPy·시각화 30 분 투어.
-4. **첫 챕터 시작**
-   - [`modules/01-descriptive-stats/01-when-mean-lies.md`](modules/01-descriptive-stats/01-when-mean-lies.md) — *평균이 거짓말할 때*.
-   - 짝이 되는 노트북: [`modules/01-descriptive-stats/01-when-mean-lies.ipynb`](modules/01-descriptive-stats/01-when-mean-lies.ipynb).
-5. **회고**
-   - 매 챕터 끝의 `reflection.md` 의 회고 질문 3 개를 *내 말로* 답해 본다.
+## 현재 구성
 
----
-
-## 학습 철학
-
-각 챕터는 같은 7-블록 구조로 작성됩니다.
-
-> 시나리오 → 위험(Why) → 도메인 사례(Where) → 직관 → 정의·수식 → 실습 → 함정 → 다음 질문
-
-자세한 원칙은 [`PEDAGOGY.md`](PEDAGOGY.md). 전체 모듈 맵과 진도 체크리스트는 [`CURRICULUM.md`](CURRICULUM.md).
-
-학습 페이스 가이드:
-
-| 호흡 | 목표 |
-|------|------|
-| 챕터 1 회 | 60~90 분. 본문 + 노트북 + 회고. |
-| 모듈 1 회 | 4~8 챕터, 1~3 주. |
-| 한 트랙 | 4~6 모듈, 2~3 개월. |
-
-회고가 짧게라도 적혀 있지 않으면 다음 챕터로 넘어가지 않는 것을 원칙으로 합니다.
-
----
-
-## 저장소 구조
-
-```
+```text
 statistics-for-data-science/
-├── README.md            ← 지금 보고 있는 파일
-├── PEDAGOGY.md          학습 철학 / 7-블록 구조 / 작성 원칙
-├── CURRICULUM.md        전체 모듈 맵 / 진도 체크리스트
-├── SETUP/               OS 별 환경 셋업 가이드
-├── modules/             학습 콘텐츠 (모듈 → 챕터)
+├── README.md
+├── CURRICULUM.md
+├── PEDAGOGY.md
+├── modules/
 │   ├── 00-orientation/
-│   ├── 01-descriptive-stats/
-│   └── ...
-├── datasets/            데이터셋 카탈로그 (출처·라이선스 포함)
-├── notebooks_template.ipynb   새 챕터 노트북 시작 템플릿
-├── pyproject.toml       의존성 매니페스트
-├── uv.lock              재현 가능한 lockfile
-└── .python-version      3.12
+│   ├── 01-data-understanding/
+│   ├── 02-data-cleaning/
+│   └── README.md
+├── archive/practical-first-v1/
+│   └── modules/        # 이전 실습형 자료 보존본
+├── SETUP/
+├── datasets/
+└── pyproject.toml
 ```
 
----
+## 학습 원칙
+
+- 각 차시는 **정의 → 전제 → 수식 → 판단 기준 → 반례 → 확인 문제** 순서로 읽습니다.
+- 코드 실습은 보조 자료입니다. 개념을 설명하지 못하면 실습 결과를 해석할 수 없다는 전제를 둡니다.
+- 단순 암기보다 “이 방법을 쓰기 위한 조건은 무엇인가?”, “조건이 깨지면 어떤 오류가 생기는가?”를 우선합니다.
+- PDF의 항목을 그대로 베끼지 않고, 강의용 이론 노트로 재구성했습니다.
+
+## 권장 페이스
+
+| 단위 | 목표 |
+|---|---|
+| 1차시 | 90~150분. 본문 정독, 수식 의미 확인, 확인 문제 풀이 |
+| 1블록 | 4~6차시. 통계 기초, 추론, 머신러닝, 신경망처럼 큰 묶음으로 복습 |
+| 전체 | 22차시. 통계 추론에서 심층 신경망까지 하나의 이론 흐름으로 연결 |
 
 ## 도구
 
-- **Python 3.12** — `uv` 가 자동으로 받아 옵니다.
-- **uv** — Python 버전·가상환경·의존성을 한 번에 관리하는 도구.
-- **JupyterLab** 또는 **VS Code + Jupyter 확장** — 노트북 실행 환경.
-- 라이브러리: `numpy`, `pandas`, `scipy`, `statsmodels`, `matplotlib`, `seaborn`, `scikit-learn`.
+실습은 필수가 아니지만, 수식 검산과 작은 예제 재현을 위해 다음 환경을 유지합니다.
 
-추가 라이브러리 (예: `pymc`)는 해당 모듈에 도달하는 시점에 의존성에 추가됩니다.
+- Python 3.12
+- `numpy`, `pandas`, `scipy`, `statsmodels`
+- `scikit-learn`
+- `matplotlib`, `seaborn`
+- JupyterLab 또는 VS Code Jupyter
 
----
+## 이전 자료
 
-## 콘텐츠 작성 (저장소 기여자용)
-
-새 챕터 작성 워크플로우는 [`PEDAGOGY.md`](PEDAGOGY.md) 의 *체크리스트* 와 [`CURRICULUM.md`](CURRICULUM.md) 의 *콘텐츠 추가 워크플로우* 를 참고하세요. 핵심:
-
-- `feat/<topic>` 브랜치에서 작업 → `main` 으로 squash merge (PR 필수).
-- `notebooks_template.ipynb` 를 복사해서 노트북 시작.
-- 7-블록 구조와 회고 질문 3 개를 빠뜨리지 않을 것.
-
----
-
-## 라이선스
-
-본 저장소의 코드·문서는 [MIT 라이선스](LICENSE).
-사용 데이터셋은 각각의 출처 라이선스를 따르며 [`datasets/README.md`](datasets/README.md) 에 정리되어 있습니다.
+이전 실습 중심 모듈은 삭제하지 않고 [archive/practical-first-v1/modules](archive/practical-first-v1/modules)에 보존했습니다. 현재 학습 진입점은 새 [modules](modules)입니다.
