@@ -1,209 +1,215 @@
 ---
 name: dev-cycle
-description: "전체 개발 사이클: pull → doc 정합성 감사(codex) → 구현 → verify → review → ship. 플래그: --loop [N], --phase <id>"
+description: "전체 개발 사이클: sync -> doc audit -> implement -> verify -> review -> ship. 플래그: --loop [N], --phase <id>"
 ---
 
 # Dev Cycle
 
 ## 플래그
 
-- `--loop` : 한 사이클 완료 후 Step 1부터 자동 재시작. Step 3에서 **ALL CLEAR** 반환 시 종료. (총 8단계)
-- `--loop N` : 정확히 N회 반복 후 종료 (ALL CLEAR 무관).
-- `--phase <id>` : 구현 대상을 프로젝트 로드맵의 특정 Phase로 한정한다. `<id>`는 프로젝트 문서에 있는 식별자를 그대로 전달한다 (예: `"Judgment System 1B"`, `TASK-011`, `"orchestrator Phase 4"`). 파싱하거나 변환하지 않는다. Step 2(doc 감사)와 Step 4(구현) 양쪽에서 이 id를 참고해 범위를 좁힌다.
-
----
+- `--loop`: 한 사이클 완료 후 Step 1부터 재시작한다. Step 3에서 **ALL CLEAR**
+  반환 시 종료한다.
+- `--loop N`: 정확히 N회 반복 후 종료한다.
+- `--phase <id>`: 구현 대상을 프로젝트 로드맵의 특정 Phase로 한정한다.
+  `<id>`는 프로젝트 문서에 있는 식별자를 그대로 전달한다.
 
 ## 실행 원칙
 
-**각 단계가 완료되면 사용자 입력 없이 즉시 다음 단계로 진행한다.** 스킬(verify, codex:rescue 등)이 완료되어 제어가 돌아와도 멈추지 않는다. 중간 결과를 보고하며 대기하지 않는다.
+각 단계가 완료되면 사용자 입력 없이 다음 단계로 진행한다. 중간 결과만 보고하고
+대기하지 않는다.
 
 멈추는 경우는 아래뿐이다:
+
 - Step 3에서 **ALL CLEAR** 반환
-- Step 3에서 **DOC FIX NEEDED** 또는 **NEXT TASK** 반환 후 사용자 승인이 명시적으로 필요한 경우
+- 사용자 승인 없이는 안전하게 진행할 수 없는 분기
 - 사이클 전체 완료
-- 오류로 인해 진행 불가
+- 인증, 권한, destructive git state 등으로 진행 불가
 
----
+## Branch / PR 원칙
 
-아래 단계를 순서대로 실행하라.
+기본은 PR-first workflow다.
 
----
+- `main` / `master` / default branch에서는 작업 브랜치를 만든다.
+- 이미 작업 브랜치에 있으면 현재 브랜치를 유지한다.
+- direct push는 사용자가 명시적으로 요청한 경우에만 한다.
+- stage는 항상 의도한 파일만 명시한다.
 
-## 리포지토리 유형 정의
+## Review / PR base 결정
 
-**Direct-push 리포 (main에 직접 커밋/push):**
-- actwyn
-- concluv
-- boilerplate
-- statistics-for-data-science
-
-리포 이름이 위 목록에 있으면 Direct-push 리포로 취급한다.
-
-그 외 모든 리포는 **Standard 리포** (feat/* → dev → main PR 워크플로우).
-
-사이클 시작 전 `git remote get-url origin` 으로 리포 이름을 확인하고, 이후 모든 분기 판단에 사용한다.
-
----
-
-## Step 1 — Sync (Claude 실행)
+리뷰와 PR 생성에 사용할 base는 매번 명시적으로 계산한다.
 
 ```bash
-git fetch origin
-git pull origin main
+REPO_NAME="$(basename "$(git rev-parse --show-toplevel)")"
+case "$REPO_NAME" in
+  actwyn|concluv|boilerplate|statistics-for-data-science)
+    REVIEW_BASE=main
+    ;;
+  *)
+    REVIEW_BASE="$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null || true)"
+    if [ -z "$REVIEW_BASE" ]; then
+      if git show-ref --verify --quiet refs/remotes/origin/dev; then
+        REVIEW_BASE=dev
+      else
+        REVIEW_BASE="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+        if [ -z "$REVIEW_BASE" ]; then
+          REVIEW_BASE="$(git remote show origin 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' || true)"
+        fi
+        [ -z "$REVIEW_BASE" ] && REVIEW_BASE=main
+      fi
+    fi
+    ;;
+esac
+echo "Review base: $REVIEW_BASE"
 ```
 
-**Standard 리포:** dev 브랜치도 최신화한다.
+판단 기준:
 
-```bash
-git checkout dev
-git pull origin dev
-git checkout -  # 원래 브랜치로 복귀
-```
+- Direct-push 리포는 항상 `main`을 base로 사용하고, review command에도 `--base main`을 직접 쓴다.
+- 현재 브랜치에 PR이 있으면 그 PR의 base branch를 사용한다.
+- PR이 없고 `origin/dev`가 있으면 `dev`를 사용한다.
+- 둘 다 없으면 원격 default branch를 사용하고, 감지 실패 시 `main`으로 fallback한다.
+- Claude plugin 환경에서 `/codex:review` 또는 `/codex:adversarial-review`를 호출할 때는
+  계산된 base를 `--base <branch>`로 명시한다.
 
----
+## Step 1 - Sync
 
-## Step 2 — 문서 정합성 감사 (codex:rescue 위임)
+1. repo와 현재 브랜치를 확인한다.
 
-`codex:rescue` 스킬을 호출하여 다음 프롬프트를 전달하라.
-**반드시 이전 codex 스레드를 이어받지 말고 새 세션으로 시작할 것** (`--no-continue` 또는 새 스레드 옵션 명시).
+   ```bash
+   git status -sb
+   git branch --show-current
+   git remote get-url origin
+   ```
 
-`--phase <id>` 가 지정된 경우, 프롬프트에 "구현 대상: `<id>`" 를 명시하여 codex가 해당 Phase 범위에 집중하도록 한다.
+2. 원격을 가져온다.
 
----
+   ```bash
+   git fetch origin
+   ```
 
-이 리포지토리의 문서와 구현 상태의 정합성을 감사하고, 다음 작업을 식별하라.
+3. default branch에서 시작했다면 최신 원격 default branch로 fast-forward한다.
+   fast-forward가 불가능하면 멈추고 원인을 보고한다.
 
-**수행 절차:**
+## Step 2 - 문서 정합성 감사
 
-1. 모든 문서 파일을 읽어라 (README.md, CLAUDE.md, ARCHITECTURE.md, docs/**, 기타 문서 파일)
-2. 현재 구현 상태를 파악하라:
-   - `git log --oneline -30`으로 최근 커밋 흐름 확인
-   - 주요 소스 디렉토리 및 파일 탐색
-3. 문서와 코드 사이의 불일치를 식별하라:
-   - 문서에 있지만 미구현된 기능
-   - 구현되었지만 문서에 없는 기능
-   - 오래되거나 잘못된 설명
-4. TODO, 미완성 구현, 개선 가능한 부분에서 다음 작업을 도출하라
-   - `--phase <id>` 가 지정된 경우, 해당 Phase 범위의 작업만 도출한다
+로컬에서 직접 감사한다. 다른 slash command나 외부 agent 스킬 호출을 전제로 하지 않는다.
 
-**반환 형식 — 아래 중 정확히 하나를 선택:**
+읽기 순서:
+
+1. `AGENTS.md`, `CLAUDE.md`, README, repo-local guidance 중 존재하는 파일
+2. `docs/ARCHITECTURE.md`, `docs/CODE_MAP.md`, `docs/TESTING.md` 등 얇은 핵심 문서
+3. task/phase와 직접 관련된 소스, 테스트, 문서
+
+긴 설계 문서, archive, generated file은 기본으로 열지 않는다. `--phase <id>`가
+지정된 경우 해당 Phase 범위에 필요한 문서와 코드만 읽는다.
+
+감사 항목:
+
+- 문서에 있지만 미구현된 기능
+- 구현되었지만 thin docs에 없는 기능
+- 오래되거나 잘못된 설명
+- TODO, 미완성 구현, 테스트 공백
+
+반환 형식은 아래 중 정확히 하나다:
 
 **## DOC FIX NEEDED**
-[파일명과 수정 내용을 포함한 구체적인 불일치 목록. Claude가 바로 실행 가능한 프롬프트 형태로 작성.]
+
+파일명과 수정 내용을 포함한 구체적인 문서 수정 목록.
 
 **## NEXT TASK**
-[다음 구현할 기능이나 개선 작업의 명확한 프롬프트. 충분한 컨텍스트 포함.]
+
+다음 구현할 기능이나 개선 작업의 명확한 작업 설명.
 
 **## ALL CLEAR**
-[현재 상태 요약. 추가 작업 없음.]
 
----
+현재 상태 요약. 추가 작업 없음.
 
-## Step 3 — 결과 판단 (Claude 실행)
+## Step 3 - 결과 판단
 
-- **ALL CLEAR:** 사용자에게 현재 상태를 보고하고 중단한다.
-- **DOC FIX NEEDED:** Step 4로 진행, 작업 유형은 `docs`
-- **NEXT TASK:** Step 4로 진행, 작업 유형은 codex가 반환한 내용에 따라 결정
+- **ALL CLEAR:** 현재 상태를 보고하고 중단한다.
+- **DOC FIX NEEDED:** Step 4로 진행, 작업 유형은 `docs`.
+- **NEXT TASK:** Step 4로 진행, 작업 유형은 내용에 따라 정한다.
 
----
+## Step 4 - 브랜치 생성 & 구현
 
-## Step 4 — 브랜치 생성 & 구현 (Claude 실행)
-
-**브랜치 명명:** `<type>/<짧은-설명>`
+브랜치 명명: `codex/<짧은-설명>` 또는 `<type>/<짧은-설명>`.
 
 `<type>`은 conventional commit 타입 중 적절한 것을 사용한다:
-`feat` / `fix` / `docs` / `refactor` / `perf` / `test` / `chore` 등
+`feat` / `fix` / `docs` / `refactor` / `perf` / `test` / `chore`.
 
-**Direct-push 리포:** 브랜치 생성 없이 `main`에서 직접 작업
+구현 원칙:
 
-**Standard 리포:** 위 규칙에 따라 브랜치 생성 후 작업
+- `update_plan`으로 작은 작업 단위를 만든다.
+- 기존 코드 스타일과 repo 경계를 따른다.
+- 수동 편집은 `apply_patch`를 사용한다.
+- 런타임 동작, schema, env, validation command를 바꾸면 repo guidance의 문서
+  갱신 규칙을 따른다.
+- `--phase <id>`가 지정된 경우 범위를 벗어난 작업은 하지 않는다.
 
-`--phase <id>` 가 지정된 경우, 해당 프로젝트 Phase에 해당하는 작업만 구현한다. 범위를 벗어난 작업은 하지 않는다.
+## Step 5 - Verify
 
-Step 2에서 받은 프롬프트(DOC FIX NEEDED 또는 NEXT TASK)를 실행한다.
+`verify` 스킬의 절차를 같은 세션에서 수행한다.
 
----
+- 요구사항을 체크리스트로 재분해한다.
+- 구현/테스트/문서 누락을 찾는다.
+- 누락이 있으면 수정하고 관련 검증을 다시 실행한다.
+- 최종적으로 repo가 정의한 full/pre-PR 검증 명령을 실행한다.
 
-## Step 5 — Verify (Claude 실행)
+## Step 6 - Code Review Pass
 
-`/verify` 커맨드를 실행한다.
+`REVIEW_BASE`를 계산한 뒤 로컬 code-review stance로 자체 리뷰를 수행한다. Direct-push
+리포에서는 `REVIEW_BASE=main`이어야 한다. 결과는 findings first로 정리한다.
 
----
+집중 기준:
 
-## Step 6 — Code Review 루프 (Claude 실행)
+- 버그, behavioral regression, missing test
+- security/auth/data-loss 위험
+- schema/runtime/docs 불일치
+- 변경 범위를 벗어난 refactor
 
-### 리뷰 스킬 선택 기준
+루프 절차:
 
-**Direct-push 리포:** 회차와 무관하게 항상 `/codex:adversarial-review` 를 사용한다.
+1. `$REVIEW_BASE...HEAD` 기준의 현재 diff를 리뷰한다.
+2. actionable finding이 있으면 수정하고 관련 테스트를 실행한다.
+3. 최대 5회 반복한다.
+4. 5회 초과 후에도 남은 항목은 GitHub issue로 남기고 Step 7로 진행한다.
 
-**Standard 리포:** 구현 작업 규모를 판단한다.
+## Step 7 - 로컬 테스트 & CI 검증
 
-깊은 리뷰 필요 기준: 변경된 파일 5개 초과, 또는 새 기능/아키텍처 변경, 또는 보안·인증 관련 코드 포함
+프로젝트의 문서화된 검증 명령을 실행한다.
 
-| 회차 | 깊은 리뷰 필요 시 | 일반 시 |
-|------|-----------------|---------|
-| 1회차 | `/codex:adversarial-review` | `/codex:review` |
-| 2회차 | `/codex:adversarial-review` | `/codex:review` |
-| 3회차~ | `/codex:review` | `/codex:review` |
+일반 자동 감지 순서:
 
-### 루프 절차
+- `docs/TESTING.md`
+- `package.json#scripts`
+- `Makefile`
+- 언어별 표준 test config (`pyproject.toml`, `go.mod`, `Gemfile` 등)
 
-1. 위 기준에 따라 현재 회차에 맞는 리뷰 스킬을 **foreground**로 즉시 실행한다. bg/fg를 사용자에게 묻지 않는다.
-2. 리뷰 결과가 **pass**이면 Step 7로 진행한다
-3. 리뷰 결과에 지적 사항이 있으면 수정 후, 다음 회차 리뷰 스킬로 즉시 반복한다
-4. **5회 초과 시:** pass 여부와 무관하게 루프를 종료한다. 미해결 지적 사항은 `gh issue create`로 GitHub issue를 생성하고 (제목: `[review] <한 줄 요약>`, 본문: 미해결 항목 목록) Step 7로 진행한다. 멈추지 않는다.
+결과 분기:
 
----
+- 전부 통과 -> Step 8로 진행
+- 실패 -> 원인 파악 후 수정, Step 7 재실행
 
-## Step 7 — 로컬 테스트 & CI 검증 (Claude 실행)
+## Step 8 - Ship
 
-프로젝트의 테스트 스위트와 정적 분석을 로컬에서 실행한다.
+사용자가 ship/PR/merge를 요청한 경우에만 publish한다.
 
-**테스트 명령 자동 감지 순서:**
-- `Makefile` → `make test` 또는 `make ci`
-- `package.json` → `npm test` / `yarn test` / `bun test`
-- `pyproject.toml` / `pytest.ini` → `pytest`
-- `go.mod` → `go test ./...`
-- `Gemfile` → `bundle exec rspec` / `bundle exec rails test`
-- 위 어느 것도 없으면 사용자에게 확인 후 진행
-
-**검사 항목 (해당하는 것만):**
-- Unit test / integration test 전체 실행
-- 타입 체커 (tsc, mypy, pyright 등)
-- 린터 (eslint, rubocop, golangci-lint 등)
-- 빌드 검증 (`npm run build`, `go build` 등)
-
-**결과 분기:**
-- 전부 통과 → Step 8로 진행
-- 실패 → 원인 파악 후 수정, Step 7 재실행
-
----
-
-## Step 8 — Ship (Claude 실행)
-
-**Direct-push 리포:**
-
-```bash
-git push origin main
-```
-
-**Standard 리포:**
-
-1. `gh pr create --base dev --draft=false` 로 PR 생성 (제목/본문 적절히 작성)
-2. `/codex-loop` 커맨드를 실행한다
-3. codex-loop 완료 후 해당 PR을 `dev` 브랜치에 **squash merge**한다
-
----
+1. `git status -sb`와 staged diff를 확인한다.
+2. 의도한 파일만 stage한다.
+3. commit한다.
+4. push한다.
+5. GitHub app 또는 `gh pr create --base "$REVIEW_BASE"`로 PR을 연다.
+6. review 대기가 필요하면 `codex-loop` 절차를 수행한다.
+7. 사용자가 merge까지 요청했고 checks/review가 통과하면 PR을 merge한다.
 
 ## 루프 재시작
 
 Step 8 완료 후 루프 모드에 따라 동작한다:
 
 | 모드 | 종료 조건 |
-|------|-----------|
+| ---- | --------- |
 | `--loop` | Step 3에서 ALL CLEAR 반환 시 |
-| `--loop N` | N회 완료 시 (ALL CLEAR 무관) |
+| `--loop N` | N회 완료 시 |
 
-**루프 종료 전:** `/compact` 를 실행해 컨텍스트를 요약·압축한다. 이후 Step 1부터 재시작한다. 컨텍스트가 압축되더라도 git log와 문서에서 이전 사이클 작업 내역을 재확인할 수 있다.
-
-종료 시 총 실행 횟수와 마지막 상태를 사용자에게 보고한다.
+루프를 재시작할 때는 `git log`, `git status`, 관련 문서를 다시 확인해 이전 사이클
+결과를 복원한다. 종료 시 총 실행 횟수와 마지막 상태를 사용자에게 보고한다.
