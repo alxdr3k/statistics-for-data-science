@@ -70,6 +70,41 @@ echo "Review base: $REVIEW_BASE"
 - 둘 다 없으면 원격 default branch를 사용하고, 감지 실패 시 `main`으로 fallback한다.
 - 코드 리뷰 도구를 호출할 때는 계산된 base를 `--base <branch>`로 명시한다.
 
+## 사이클 브리핑 로그
+
+각 사이클이 끝날 때 사용자가 바로 읽을 수 있는 짧은 브리핑을 출력하고, loop 종료 시
+종합 브리핑할 수 있도록 이번 `dev-cycle` 실행 동안만 repo-local 임시 로그에 누적한다.
+
+로그 파일은 git에 잡히지 않도록 `.git` 내부에 둔다. 새 `dev-cycle` 실행을 시작할
+때마다 파일을 overwrite하므로 이전 실행 브리핑은 섞지 않는다.
+
+```bash
+DEV_CYCLE_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+DEV_CYCLE_BRIEF_LOG="$(git rev-parse --git-dir)/dev-cycle-briefs.md"
+printf "# Dev Cycle Briefs %s\n\n" "$DEV_CYCLE_RUN_ID" > "$DEV_CYCLE_BRIEF_LOG"
+```
+
+새 `dev-cycle` 실행의 첫 사이클을 시작할 때만 위 초기화를 수행한다. context compaction
+이후 이어받은 사이클에서는 context에 남은 `DEV_CYCLE_RUN_ID`와 `DEV_CYCLE_BRIEF_LOG`를
+재사용하고 기존 내용을 읽어 계속 append한다. 즉, 한 파일에 계속 쌓이는 범위는 현재
+loop 실행 하나뿐이다.
+
+각 사이클 종료 시 아래 형식으로 5줄 이내 브리핑을 출력하고 같은 내용을
+`$DEV_CYCLE_BRIEF_LOG`에 append한다:
+
+```md
+## Cycle <N>
+- Result: <DOC FIX / NEXT TASK / ALL CLEAR / shipped / blocked>
+- Work: <주요 변경 또는 판단 1줄>
+- Verification: <실행한 검증과 결과>
+- Review/Ship: <review 결과, PR/merge/push 결과>
+- Risk: <남은 리스크 또는 없음>
+```
+
+loop 모드가 끝나면 `$DEV_CYCLE_BRIEF_LOG`를 읽어 전체 iteration의 종합 브리핑을
+8줄 이내로 다시 출력한다. 로그 파일이 없으면 `git log`, `git status`, 현재 context
+요약을 근거로 복원하되, 복원임을 명시한다.
+
 ## Step 1 - Sync
 
 1. repo와 현재 브랜치를 확인한다.
@@ -210,5 +245,11 @@ Step 8 완료 후 루프 모드에 따라 동작한다:
 | `--loop` | Step 3에서 ALL CLEAR 반환 시 |
 | `--loop N` | N회 완료 시 |
 
+각 사이클 종료 시 반드시 "사이클 브리핑 로그" 절차를 수행한다. 즉, 이번 사이클
+브리핑을 출력하고 `$DEV_CYCLE_BRIEF_LOG`에 append한 뒤 다음 iteration으로 넘어간다.
+context가 압축되더라도 `DEV_CYCLE_RUN_ID`, `$DEV_CYCLE_BRIEF_LOG`, git log, 문서에서
+이전 사이클 작업 내역을 재확인할 수 있다.
+
 루프를 재시작할 때는 `git log`, `git status`, 관련 문서를 다시 확인해 이전 사이클
-결과를 복원한다. 종료 시 총 실행 횟수와 마지막 상태를 사용자에게 보고한다.
+결과를 복원한다. 종료 시 총 실행 횟수, 마지막 상태, `$DEV_CYCLE_BRIEF_LOG` 기반
+종합 브리핑을 사용자에게 보고한다.
