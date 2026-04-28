@@ -4,14 +4,14 @@ PDF 강의자료의 22차시 구성을 따라가되, **데이터 사이언스를
 
 이 자료의 기준은 “많이 아는 사람에게 압축해서 설명하기”가 아닙니다. 처음 보는 용어를 하나씩 풀고, 쉬운 예시로 이해한 뒤, PDF의 개념 이름과 연결하는 방식으로 작성합니다.
 
-현재 실제 학습자료 본문은 **4일차(4차시 통계와 확률)** 까지 작성했습니다. 나머지 차시는 커리큘럼 설계만 잡아 두었습니다.
+현재 실제 학습자료 본문은 **22일차(22차시 심층 신경망)** 까지 작성했습니다.
 
 ## 여기서 시작
 
 1. 전체 흐름을 먼저 봅니다: [CURRICULUM.md](CURRICULUM.md)
 2. 학습 방식과 작성 기준을 확인합니다: [PEDAGOGY.md](PEDAGOGY.md)
 3. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
-4. 현재 작성된 자료는 [1차시 데이터의 이해](modules/01-data-understanding/README.md), [2차시 데이터 정제](modules/02-data-cleaning/README.md), [3차시 데이터 변환](modules/03-data-transformation/README.md), [4차시 통계와 확률](modules/04-statistics-probability/README.md)입니다.
+4. 현재 작성된 자료는 [modules/README.md](modules/README.md)에서 1~22차시 전체를 확인할 수 있습니다.
 
 ## 현재 구성
 
@@ -26,6 +26,9 @@ statistics-for-data-science/
 │   ├── 02-data-cleaning/
 │   ├── 03-data-transformation/
 │   ├── 04-statistics-probability/
+│   ├── 05-probability-distributions/
+│   ├── ...
+│   ├── 22-deep-neural-networks/
 │   └── README.md
 ├── archive/practical-first-v1/
 │   └── modules/        # 이전 실습형 자료 보존본
