@@ -64,7 +64,8 @@ echo "Review base: $REVIEW_BASE"
 
 판단 기준:
 
-- Direct-push 리포는 항상 `main`을 base로 사용하고, review command에도 `--base main`을 직접 쓴다.
+- Direct-push 리포의 ship target은 항상 `main`이다. review diff 선택은 Step 6의
+  "Direct-push diff 기준"을 따른다.
 - 현재 브랜치에 PR이 있으면 그 PR의 base branch를 사용한다.
 - PR이 없고 `origin/dev`가 있으면 `dev`를 사용한다.
 - 둘 다 없으면 원격 default branch를 사용하고, 감지 실패 시 `main`으로 fallback한다.
@@ -212,8 +213,16 @@ verify가 완료되면 사용자 입력을 기다리지 말고 즉시 아래 기
 
 ## Step 6 - Code Review Pass
 
-`REVIEW_BASE`를 계산한 뒤 로컬 code-review stance로 자체 리뷰를 수행한다. Direct-push
-리포에서는 `REVIEW_BASE=main`이어야 한다. 결과는 findings first로 정리한다.
+`REVIEW_BASE`를 계산한 뒤 로컬 code-review stance로 자체 리뷰를 수행한다. 결과는
+findings first로 정리한다.
+
+Direct-push diff 기준:
+
+- `main...HEAD`가 비었다고 리뷰 대상이 없다고 판단하지 않는다.
+- worktree/staged/untracked 변경이 있으면 `git diff`, `git diff --cached`,
+  `git ls-files --others --exclude-standard` 기준으로 로컬 변경사항을 리뷰한다.
+- worktree가 clean이고 unpublished commit이 있으면 `origin/main...HEAD` 기준으로
+  리뷰한다. `origin/main`이 없을 때만 `main...HEAD`를 fallback으로 사용한다.
 
 집중 기준:
 
@@ -224,7 +233,8 @@ verify가 완료되면 사용자 입력을 기다리지 말고 즉시 아래 기
 
 루프 절차:
 
-1. `$REVIEW_BASE...HEAD` 기준의 현재 diff를 리뷰한다.
+1. 현재 diff를 리뷰한다. Direct-push는 위 "Direct-push diff 기준"을 따르고,
+   Standard 리포는 `$REVIEW_BASE...HEAD` 기준으로 리뷰한다.
 2. actionable finding이 있으면 수정하고 관련 테스트를 실행한다.
 3. 최대 5회 반복한다.
 4. 5회 초과 후에도 남은 항목은 GitHub issue로 남기고 Step 7로 진행한다.

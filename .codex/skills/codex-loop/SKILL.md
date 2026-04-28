@@ -1,9 +1,9 @@
 ---
 name: codex-loop
-description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push, 통과 reaction까지 반복
+description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push, 통과 reaction을 받으면 정책에 맞춰 merge
 ---
 
-현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복.
+현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복한 뒤 PR을 정책에 맞춰 merge한다.
 
 ## 핵심 원칙: foreground wait
 
@@ -39,7 +39,7 @@ PR 탐지는 `gh` CLI를 사용한다.
 
 | 상태 | 다음 행동 |
 | ---- | --------- |
-| pass reaction이 있고 check가 통과 | PR 머지 가능 |
+| pass reaction이 있고 check가 통과 | PR merge |
 | 새 actionable comment/review가 있음 | `apply-review` 절차로 수정 → commit → push → 다시 대기 |
 | check 실패 | 실패 로그 확인 → 수정 → commit → push → 다시 대기 |
 | PR 감지 실패 | PR 번호 또는 URL 요청 |
@@ -52,7 +52,32 @@ PR 탐지는 `gh` CLI를 사용한다.
 - 수정은 최소 diff로 하고, 관련 테스트와 repo가 정의한 검증 명령을 다시 실행한다.
 - push 후 baseline을 새 push 시점으로 갱신하고 루프를 반복한다.
 
+## Merge 처리
+
+pass reaction이 있고 checks가 통과하면 사용자의 추가 확인을 기다리지 말고 PR을 merge한다. 단, merge 전 다음을 확인한다.
+
+1. PR이 draft가 아니어야 한다.
+2. required checks가 통과해야 한다.
+3. 새 actionable comment/review가 없어야 한다.
+4. repo-local guidance 또는 GitHub repo 설정이 정한 merge 방식을 따른다.
+
+권장 확인:
+
+```bash
+gh pr view --json number,url,isDraft,baseRefName,headRefName,mergeStateStatus,reviewDecision
+gh pr checks <PR_NUMBER> --watch
+gh api "repos/<owner>/<repo>" --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
+```
+
+merge 방식 선택:
+
+- repo-local guidance가 `squash merge`를 요구하면 `gh pr merge <PR_NUMBER> --squash --delete-branch`.
+- repo가 merge commit만 허용하면 `gh pr merge <PR_NUMBER> --merge --delete-branch`.
+- repo가 rebase merge만 허용하면 `gh pr merge <PR_NUMBER> --rebase --delete-branch`.
+- 명시 정책이 없고 여러 방식이 허용되면 기존 repo 관례를 따른다. 관례가 불명확하면 `--squash`를 기본값으로 사용한다.
+
+branch protection, merge queue, required check pending 때문에 즉시 merge가 막히면 같은 방식에 `--auto`를 붙여 auto-merge를 걸 수 있다. 그래도 막히면 차단 사유와 PR URL을 사용자에게 보고한다.
+
 ## 완료
 
-사용자가 머지까지 요청한 경우에만 PR을 머지한다. 기본은 PR URL, check 결과,
-처리한 feedback, 남은 리스크를 보고하는 것이다.
+PR URL, merge 방식, check 결과, 처리한 feedback, 남은 리스크를 보고한다.
