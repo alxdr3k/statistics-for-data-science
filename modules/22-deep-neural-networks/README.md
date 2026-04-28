@@ -69,7 +69,9 @@
 
 AlexNet은 깊은 CNN의 가능성을 크게 보였고, VGG는 작은 필터를 깊게 쌓는 단순한 구조를 강조했다. GoogLeNet/Inception은 여러 필터 크기를 병렬로 쓰고, ResNet은 잔차 연결로 매우 깊은 모델을 학습하기 쉽게 했다.
 
-![심층 신경망의 특징](assets/deep-network-features-603.png)
+![심층 신경망의 특징](assets/deep-network-features-604.png)
+
+![ResNet의 잔차 연결](assets/resnet-613.png)
 
 ### 2. Batch Normalization
 
@@ -80,6 +82,8 @@ AlexNet은 깊은 CNN의 가능성을 크게 보였고, VGG는 작은 필터를 
 단어를 원-핫이 아니라 의미 있는 벡터로 표현한다. CBOW는 주변 단어로 중심 단어를, Skip-gram은 중심 단어로 주변 단어를 예측한다.
 
 CBOW는 Continuous Bag of Words의 줄임말로, 주변 단어들을 한 묶음처럼 보고 가운데 단어를 맞힌다. Skip-gram은 반대로 중심 단어에서 주변 단어들을 건너뛰며 예측한다는 느낌이다. 두 방식 모두 “비슷한 문맥에 나오는 단어는 의미도 비슷하다”는 생각을 벡터로 학습한다.
+
+![Word2Vec 학습 방식](assets/word2vec-617.png)
 
 ### 4. 사전학습과 전이학습
 

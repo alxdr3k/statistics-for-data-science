@@ -75,21 +75,29 @@ Batch GD는 전체 데이터를 보고 한 번 업데이트한다. SGD는 표본
 
 에폭은 전체 훈련 데이터를 한 번 모두 사용한 단위다. 같은 에폭 수라도 배치 크기가 작으면 업데이트 횟수가 많아지고, 배치 크기가 크면 업데이트 횟수가 줄어든다.
 
-![경사하강법 리뷰](assets/gradient-review-575.png)
+![경사하강법 리뷰](assets/gradient-review-576.png)
+
+![미니배치 학습 절차](assets/mini-batch-process-580.png)
 
 ### 2. Momentum과 NAG
 
 Momentum은 이전 방향의 관성을 더해 좁은 골짜기에서 흔들림을 줄인다. NAG는 먼저 가볼 위치의 기울기를 보고 보정한다.
 
+![NAG의 미리 보는 기울기](assets/nag-587.png)
+
 ### 3. Adagrad, RMSProp, Adadelta
 
 Adagrad는 자주 업데이트된 파라미터의 학습률을 줄인다. RMSProp은 최근 기울기 제곱 평균을 사용해 Adagrad의 과도한 감소 문제를 완화한다. Adadelta도 같은 문제의식에서 출발해 업데이트 크기가 지나치게 작아지는 현상을 줄이려는 방법이다.
+
+![Adagrad의 학습률 조절](assets/adagrad-590.png)
+
+![Adaptive Optimizer 비교](assets/adaptive-optimizers-593.png)
 
 ### 4. Adam
 
 Momentum과 RMSProp의 장점을 결합한다. 기본값으로 잘 작동하는 경우가 많지만, 빠른 수렴이 항상 좋은 일반화를 보장하지는 않는다.
 
-![최적화 방법 비교](assets/optimizer-comparison-590.png)
+![Adam의 모멘텀과 적응 학습률](assets/adam-596.png)
 
 ## 판단 기준
 

@@ -79,11 +79,13 @@
 
 결정계수 R2는 종속변수 변동 중 모델이 설명한 비율이다. 조정 R2는 변수가 늘어날 때의 과대평가를 줄이고, AIC/BIC는 적합도와 복잡도를 함께 본다.
 
+![선형회귀 계수의 유의성 검정](assets/coefficient-test-247.png)
+
 ### 4. 진단과 대응
 
 잔차 플롯, Q-Q plot, VIF, 영향점 지표로 문제를 찾는다. 필요하면 변수 제거, 변환, 규제, 차원축소를 고려한다.
 
-![회귀 진단의 필요성](assets/regression-diagnostics-247.png)
+![잔차 정규성과 등분산성 진단](assets/regression-diagnostics-244.png)
 
 ## 판단 기준
 

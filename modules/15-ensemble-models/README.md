@@ -69,19 +69,25 @@
 
 부트스트랩 표본을 여러 개 만들고 각 표본으로 모델을 학습한 뒤 평균이나 투표로 합친다. 분산을 줄이는 데 강하다.
 
-![앙상블의 직관](assets/ensemble-intuition-405.png)
+![앙상블의 원리](assets/ensemble-principle-407.png)
+
+![배깅과 부트스트랩](assets/bagging-bootstrap-408.png)
 
 ### 2. 랜덤 포레스트
 
 의사결정나무를 많이 만들되 표본과 변수 선택에 무작위성을 넣는다. 나무들이 서로 달라져 앙상블 효과가 커진다.
 
-![랜덤 포레스트](assets/random-forest-408.png)
+![랜덤 포레스트](assets/random-forest-410.png)
 
 ### 3. 부스팅
 
 앞 모델이 틀린 부분을 다음 모델이 더 신경 쓰게 만들어 순차적으로 오류를 줄인다. 성능은 강하지만 과적합 관리가 중요하다.
 
 AdaBoost는 틀린 데이터의 가중치를 키워 다음 모델이 그 데이터를 더 신경 쓰게 만든다. 경사 부스팅은 현재 모델이 남긴 잔차나 손실이 줄어드는 방향을 다음 모델이 맞추는 방식이다. 둘 다 “약한 모델을 순서대로 보완한다”는 큰 틀은 같지만, 무엇을 보완 신호로 삼는지가 다르다.
+
+![AdaBoost의 가중치 갱신](assets/adaboost-412.png)
+
+![Gradient Boosting의 잔차 학습](assets/gradient-boosting-417.png)
 
 ### 4. 보팅과 스태킹
 

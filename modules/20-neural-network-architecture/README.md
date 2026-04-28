@@ -69,11 +69,13 @@
 
 Dense는 일반적인 수치 벡터를 처리하는 기본 층이다. Embedding은 단어, 사용자, 상품 같은 범주를 연속 벡터로 바꿔 의미적 관계를 학습한다.
 
-![Dense Layer 구조](assets/dense-layer-546.png)
+![Dense Layer 구조](assets/dense-layer-547.png)
 
 ### 2. CNN
 
 합성곱은 필터로 지역 패턴을 찾고, 풀링은 영역별 대표값으로 정보를 압축한다. 위치 기반 패턴을 잘 다룬다.
+
+![합성곱 연산 예시](assets/convolution-example-553.png)
 
 ### 3. RNN, LSTM, GRU
 
@@ -84,6 +86,8 @@ RNN은 순서 데이터를 처리하지만 긴 의존성을 잘 보존하기 어
 ### 4. 보조 레이어
 
 Dropout은 과적합을 줄이고, Pooling은 공간 크기를 줄이며, Batch Normalization은 학습 안정화와 연결된다.
+
+![Dropout의 직관](assets/dropout-566.png)
 
 ## 판단 기준
 
