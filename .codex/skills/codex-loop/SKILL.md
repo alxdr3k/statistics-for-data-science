@@ -2,6 +2,13 @@
 name: codex-loop
 description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push, 통과 reaction을 받으면 정책에 맞춰 merge
 ---
+<!-- my-skill:generated
+skill: codex-loop
+base-sha256: 172a35ad4df90cfc27d2dc0fc7e95abf6343170954f8e7444a7a673bda4c7e25
+overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+output-sha256: 172a35ad4df90cfc27d2dc0fc7e95abf6343170954f8e7444a7a673bda4c7e25
+do-not-edit: edit .codex/skill-overrides/codex-loop.md instead
+-->
 
 현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복한 뒤 PR을 정책에 맞춰 merge한다.
 

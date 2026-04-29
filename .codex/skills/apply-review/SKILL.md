@@ -3,6 +3,13 @@ name: apply-review
 description: Apply all review feedback; split into timeout-safe chunks; do not stop until every item is done
 argument-hint: [review text, PR/comment URL, or path to review notes]
 ---
+<!-- my-skill:generated
+skill: apply-review
+base-sha256: ba3667e54d35f30af571758527531a5df003f09afddc81f0dfa29da875ff037d
+overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+output-sha256: ba3667e54d35f30af571758527531a5df003f09afddc81f0dfa29da875ff037d
+do-not-edit: edit .codex/skill-overrides/apply-review.md instead
+-->
 
 # Apply review
 
