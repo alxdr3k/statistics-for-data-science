@@ -5,12 +5,20 @@ description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push
 
 현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복한 뒤 PR을 정책에 맞춰 merge한다.
 
-## ⚠️ 핵심 원칙: foreground sync로 한 번만 호출
+사용자에게 보이는 보고, feedback 정리, 질문은 한국어로 작성한다. 코드, 명령, 파일명, 원문 인용은 원문 언어를 유지한다.
 
-**스크립트는 polling sleep 동안 idle**이라 그 시간 동안 토큰을 전혀 쓰지 않음. 한 번 호출하고 종료까지 기다리면 한 번의 결과만 받게 됨. **이게 이 스크립트의 존재 이유다.**
+## 핵심 원칙: 대기 사이클마다 foreground sync 1회
+
+각 대기 사이클은 `wait-codex-review.sh`를 foreground로 1회 실행해 처리한다.
+스크립트는 polling sleep 동안 idle이라 그 시간 동안 토큰을 거의 쓰지 않는다.
+GitHub app으로 즉시 확인 가능한 상태가 있어도 대기/polling은 스크립트에 맡긴다.
+feedback을 수정하고 push한 뒤에는 다음 대기 사이클로 보고 스크립트를 다시 실행한다.
 
 ```bash
-bash .claude/scripts/wait-codex-review.sh
+CODEX_REVIEW_HELPER=".agents/scripts/wait-codex-review.sh"
+[ -x "$CODEX_REVIEW_HELPER" ] || CODEX_REVIEW_HELPER="$HOME/.agents/scripts/wait-codex-review.sh"
+[ -x "$CODEX_REVIEW_HELPER" ] || { echo "Missing wait-codex-review.sh"; exit 1; }
+bash "$CODEX_REVIEW_HELPER"
 ```
 
 다음 패턴은 **금지** — 매 cycle마다 stdout/상태를 확인하면 토큰을 그대로 다 쓰게 되어 스크립트의 의미가 사라짐:
@@ -21,7 +29,7 @@ bash .claude/scripts/wait-codex-review.sh
 
 ## 절차
 
-1. PR 만든 직후, 또는 push 직후, 위 명령을 **foreground로 한 번** 실행한다.
+1. PR 만든 직후, 또는 push 직후, 위 명령을 **foreground로 1회** 실행한다.
 2. 종료될 때까지 기다린다 (스크립트가 알아서 polling).
 3. 종료 코드에 따라 처리:
 
@@ -75,8 +83,8 @@ branch protection, merge queue, required check pending 때문에 즉시 merge가
 ## 인자 형식
 
 - 인자 없음: 현재 브랜치의 PR 자동 감지
-- PR 번호: `bash ... 42`
-- PR URL: `bash ... https://github.com/owner/repo/pull/42`
+- PR 번호: `bash "$CODEX_REVIEW_HELPER" 42`
+- PR URL: `bash "$CODEX_REVIEW_HELPER" https://github.com/owner/repo/pull/42`
 
 ## 작업 지시 시 주의
 

@@ -1,330 +1,145 @@
 ---
 name: dev-cycle
-description: "전체 개발 사이클: pull → 구현 후보 탐색(codex) → 구현 → verify → review → ship. 플래그: --loop [N], --phase <id>"
+description: "전체 개발 사이클: sync → discover → implement → verify → review → ship. 플래그: --loop [N], --phase <id>"
 ---
 
 # Dev Cycle
 
-## 플래그
+## Flags
 
-- `--loop` : 한 사이클 완료 후 Step 1부터 자동 재시작. Step 3에서 **ALL CLEAR** 반환 시 종료. (총 8단계)
-- `--loop N` : 정확히 N회 반복 후 종료 (ALL CLEAR 무관).
-- `--phase <id>` : 구현 대상을 프로젝트 로드맵의 특정 Phase로 한정한다. `<id>`는 프로젝트 문서에 있는 식별자를 그대로 전달한다 (예: `"Judgment System 1B"`, `TASK-011`, `"orchestrator Phase 4"`). 파싱하거나 변환하지 않는다. Step 2(구현 후보 탐색)와 Step 4(구현) 양쪽에서 이 id를 참고해 범위를 좁힌다.
+- `--loop`: cycle 완료 후 Step 1부터 반복한다. Step 3에서 **ALL CLEAR**이면 종료한다.
+- `--loop N`: 정확히 N회 반복한다.
+- `--phase <id>`: 탐색과 구현 범위를 해당 roadmap/task/phase id로 제한한다. 값을 파싱하거나 변환하지 않는다.
 
----
+## Invariants
 
-## 실행 원칙
-
-**각 단계가 완료되면 사용자 입력 없이 즉시 다음 단계로 진행한다.** 커맨드나 스킬(verify, `/codex:rescue` 등)이 완료되어 제어가 돌아와도 멈추지 않는다. 중간 결과를 보고하며 대기하지 않는다.
-
-멈추는 경우는 아래뿐이다:
-- Step 3에서 **ALL CLEAR** 반환
-- Step 3에서 **DOC FIX NEEDED** 또는 **NEXT TASK** 반환 후 사용자 승인이 명시적으로 필요한 경우
-- 사이클 전체 완료
-- 오류로 인해 진행 불가
-
----
-
-아래 단계를 순서대로 실행하라.
-
----
-
-## 리포지토리 유형 정의
-
-**Direct-push 리포 (main에 직접 커밋/push):**
-- actwyn
-- concluv
-- boilerplate
-- statistics-for-data-science
-
-리포 이름이 위 목록에 있으면 Direct-push 리포로 취급한다.
-
-그 외 모든 리포는 **Standard 리포** (feat/* → dev → main PR 워크플로우).
-
-사이클 시작 전 `git remote get-url origin` 으로 리포 이름을 확인하고, 이후 모든 분기 판단에 사용한다.
-
----
-
-## Review / PR base 결정
-
-리뷰와 PR 생성에 사용할 base는 매번 명시적으로 계산한다.
+- Step이 끝나면 사용자 입력 없이 다음 Step으로 진행한다.
+- 멈추는 경우: **ALL CLEAR**, 사용자 승인 없이는 안전하지 않은 분기, 인증/권한/destructive git state, 해결 불가 blocker.
+- 사용자에게 보이는 보고, brief, finding, 질문은 한국어로 작성한다. 코드, 명령, 파일명, 원문 인용은 원문 언어를 유지한다.
+- repo type, review base, sync, brief log, risk issue 처리는 helper가 담당한다.
+- helper 경로는 아래 순서로 찾는다.
 
 ```bash
-REPO_NAME="$(basename "$(git rev-parse --show-toplevel)")"
-case "$REPO_NAME" in
-  actwyn|concluv|boilerplate|statistics-for-data-science)
-    REVIEW_BASE=main
-    ;;
-  *)
-    REVIEW_BASE="$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null || true)"
-    if [ -z "$REVIEW_BASE" ]; then
-      if git show-ref --verify --quiet refs/remotes/origin/dev; then
-        REVIEW_BASE=dev
-      else
-        REVIEW_BASE="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
-        if [ -z "$REVIEW_BASE" ]; then
-          REVIEW_BASE="$(git remote show origin 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' || true)"
-        fi
-        [ -z "$REVIEW_BASE" ] && REVIEW_BASE=main
-      fi
-    fi
-    ;;
-esac
+DEV_CYCLE_HELPER=".agents/scripts/dev-cycle-helper.sh"
+[ -x "$DEV_CYCLE_HELPER" ] || DEV_CYCLE_HELPER="$HOME/.agents/scripts/dev-cycle-helper.sh"
+[ -x "$DEV_CYCLE_HELPER" ] || { echo "Missing dev-cycle-helper.sh"; exit 1; }
+```
+
+## Brief Log
+
+새 실행의 첫 cycle에서만 초기화한다.
+`init-brief`는 `.dev-cycle/dev-cycle-run-id`와 `.dev-cycle/dev-cycle-briefs.md`를 만들고 export를 출력한다. Bash 호출 사이에 export가 사라져도 `finish-cycle`과 `summary`는 저장된 state를 검증해 이어 쓴다.
+
+```bash
+eval "$("$DEV_CYCLE_HELPER" init-brief)"
+```
+
+이어서 실행하는 cycle이라면 `DEV_CYCLE_RUN_ID`와 `DEV_CYCLE_BRIEF_LOG`를 재사용하기 전에 반드시 검증한다.
+
+```bash
+"$DEV_CYCLE_HELPER" validate-brief "$DEV_CYCLE_RUN_ID" "$DEV_CYCLE_BRIEF_LOG"
+```
+
+검증 실패 또는 확신이 없으면 새 실행으로 보고 `init-brief`를 다시 실행한다. 단, cycle 종료 시점의 누락된 환경변수를 복구하려고 `init-brief`를 다시 실행하지 않는다. 그것은 새 brief log를 시작한다.
+
+Cycle 종료 시 아래 값을 채워 helper로 brief를 출력하고 append한다. **ALL CLEAR, blocked, publish 금지로 종료하는 경우도 먼저 `finish-cycle`을 실행한다.** `Risk`가 비어 있지 않으면 helper가 GitHub issue를 만들고 issue URL을 brief에 기록한다. issue 생성에 실패하면 helper가 `blocked` brief를 append하고 중단한다.
+`finish-cycle`의 stdout은 tool output일 뿐 사용자에게 자동 전달되지 않는다. `finish-cycle` 직후에는 출력된 cycle brief를 사용자에게 한국어로 보고한다. `--loop` 또는 `--loop N`이면 이 보고를 마친 뒤에만 다음 Step 1로 돌아간다.
+
+```bash
+DEV_CYCLE_CYCLE=<N> \
+DEV_CYCLE_RESULT="<DOC FIX / NEXT TASK / ALL CLEAR / shipped / blocked>" \
+DEV_CYCLE_WORK="<주요 변경 또는 판단 1줄>" \
+DEV_CYCLE_VERIFICATION="<검증 결과>" \
+DEV_CYCLE_REVIEW_SHIP="<review/ship 결과>" \
+DEV_CYCLE_RISK="<남은 리스크 또는 없음>" \
+DEV_CYCLE_NEXT_ACTION="<리스크 후속 작업>" \
+"$DEV_CYCLE_HELPER" finish-cycle
+```
+
+## Step 1 - Sync
+
+```bash
+"$DEV_CYCLE_HELPER" sync
+REPO_TYPE="$("$DEV_CYCLE_HELPER" repo-type)"
+REVIEW_BASE="$("$DEV_CYCLE_HELPER" review-base)"
+echo "Repo type: $REPO_TYPE"
 echo "Review base: $REVIEW_BASE"
 ```
 
-판단 기준:
+## Step 2 - Discover
 
-- Direct-push 리포의 ship target은 항상 `main`이다. review diff 선택은 Step 6의
-  "Direct-push diff 기준"을 따른다.
-- 현재 브랜치에 PR이 있으면 그 PR의 base branch를 사용한다.
-- PR이 없고 `origin/dev`가 있으면 `dev`를 사용한다.
-- 둘 다 없으면 원격 default branch를 사용하고, 감지 실패 시 `main`으로 fallback한다.
-- slash command에서 shell 변수 확장이 보장되지 않으면 계산된 실제 branch 이름을 넣는다.
+`/codex:rescue --fresh --wait`를 foreground로 실행한다. `--phase <id>`가 있으면 프롬프트에 그대로 넣는다.
+`/codex:rescue`에 전달하는 프롬프트는 영어로 작성한다. 반환 결과를 사용자에게 보고할 때는 한국어로 정리한다.
 
----
+Prompt:
 
-## 사이클 브리핑 로그
+```text
+Choose one task for the next cycle based on this repo's guidance, README, roadmap, thin docs, source, and tests.
+Read long design/archive/generated documents only when needed.
+Prefer implementation candidates. Choose docs-only only when there is no code work to do and only docs are wrong.
+If both docs and code are needed, return it as an implementation task and include docs update in the acceptance criteria.
+If --phase is present, inspect only that id's scope.
 
-각 사이클이 끝날 때 사용자가 바로 읽을 수 있는 짧은 브리핑을 출력하고, loop 종료 시
-종합 브리핑할 수 있도록 이번 `dev-cycle` 실행 동안만 repo-local 임시 로그에 누적한다.
+Return one of:
+## NEXT TASK
+<one task including files/areas, acceptance criteria, docs update, and validation>
 
-로그 파일은 git에 잡히지 않도록 `.git` 내부에 둔다. 새 `dev-cycle` 실행을 시작할
-때마다 파일을 overwrite하므로 이전 실행 브리핑은 섞지 않는다.
+## DOC FIX NEEDED
+<docs-only fix list>
+
+## ALL CLEAR
+<current state summary>
+```
+
+## Step 3 - Decide
+
+- **ALL CLEAR**: `DEV_CYCLE_RESULT="ALL CLEAR"`로 `finish-cycle`을 실행한 뒤 종료한다.
+- **NEXT TASK**: Step 4로 간다.
+- **DOC FIX NEEDED**: Step 4로 가되 작업 type은 `docs`.
+
+## Step 4 - Implement
+
+- Direct-push repo: `main`에서 직접 작업한다.
+- Standard repo: default branch에서 시작했다면 `<type>/<short-description>` 브랜치를 만들고, 이미 작업 브랜치면 유지한다.
+- Step 2의 task를 구현한다. docs update가 acceptance criteria면 같은 cycle에서 처리한다.
+- `--phase <id>` 범위를 벗어난 작업은 하지 않는다.
+
+## Step 5 - Verify
+
+`/verify`를 실행한다. 완료 후 멈추지 말고 분기한다.
+
+- pass 또는 누락 수정 완료: Step 6.
+- 해결 불가 blocker: `DEV_CYCLE_RESULT="blocked"`로 `finish-cycle`을 실행하고 중단.
+
+## Step 6 - Review
+
+리뷰 직전 다시 계산한다.
 
 ```bash
-DEV_CYCLE_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-DEV_CYCLE_BRIEF_LOG="$(git rev-parse --git-dir)/dev-cycle-briefs.md"
-printf "# Dev Cycle Briefs %s\n\n" "$DEV_CYCLE_RUN_ID" > "$DEV_CYCLE_BRIEF_LOG"
+REVIEW_BASE="$("$DEV_CYCLE_HELPER" review-base)"
 ```
 
-새 `dev-cycle` 실행의 첫 사이클을 시작할 때만 위 초기화를 수행한다. `/compact` 이후
-이어받은 사이클에서는 요약에 남은 `DEV_CYCLE_RUN_ID`와 `DEV_CYCLE_BRIEF_LOG`를 재사용하고
-기존 내용을 읽어 계속 append한다. 즉, 한 파일에 계속 쌓이는 범위는 현재 loop 실행
-하나뿐이다.
+- Direct-push repo: local diff, staged diff, untracked files, 또는 unpublished `origin/main...HEAD`를 리뷰한다.
+- Standard repo: `$REVIEW_BASE...HEAD` 기준으로 리뷰한다.
+- Review Pass는 diff review와 impact triage/scan이 함께 통과한 상태다. impact scan을 review OK 이후 별도 단계로 두지 않는다.
+- Impact triage: docs/typo/leaf/test-only처럼 외부 surface가 없으면 `Impact: local only`로 끝낸다.
+- 위험 trigger: shared helper/API, command/skill, deploy/build/test infra, config/env/schema, persistence, auth/security, public CLI/output, 파일 경로/계약 변경, 변경 파일 5개 초과. 해당하면 변경된 symbol/path/env/command를 `rg`로 repo 전체에서 추적해 call site/docs/tests/deploy refs를 확인한다.
+- findings는 batch로 정리한다. actionable finding은 같은 cycle에서 한 번에 수정하고 targeted verify 후 Review Pass를 반복한다. fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로 본다.
+- 새 기능/아키텍처 변경, 보안/인증 관련이면 adversarial review를 우선한다.
+- 최대 5회 반복한다. 5회 후 남은 actionable finding은 GitHub issue로 남기고 Step 7로 간다.
 
-각 사이클 종료 시 아래 형식으로 5줄 이내 브리핑을 출력하고 같은 내용을
-`$DEV_CYCLE_BRIEF_LOG`에 append한다:
+## Step 7 - Local Checks
 
-```md
-## Cycle <N>
-- Result: <DOC FIX / NEXT TASK / ALL CLEAR / shipped / blocked>
-- Work: <주요 변경 또는 판단 1줄>
-- Verification: <실행한 검증과 결과>
-- Review/Ship: <review 결과, PR/merge/push 결과>
-- Risk: <남은 리스크 또는 없음>
-```
+repo guidance와 docs/testing에 정의된 full/pre-PR 검증을 실행한다. 실패하면 수정 후 Step 7을 반복한다.
 
-loop 모드가 끝나면 `$DEV_CYCLE_BRIEF_LOG`를 읽어 전체 iteration의 종합 브리핑을
-8줄 이내로 다시 출력한다. 로그 파일이 없으면 `git log`, `git status`, 현재 대화
-요약을 근거로 복원하되, 복원임을 명시한다.
+## Step 8 - Ship
 
----
+- Direct-push repo: 의도한 파일만 stage, commit, `git push origin main`. PR은 만들지 않는다.
+- Standard repo: 의도한 파일만 stage, commit, 현재 branch push, `gh pr create --base "$REVIEW_BASE" --draft=false`, `/codex-loop`, 통과 시 squash merge.
+- 사용자가 publish 금지를 명시했으면 여기서 멈추고 local state만 보고한다.
 
-## Step 1 — Sync (Claude 실행)
+## Loop
 
-```bash
-git fetch origin
-git pull origin main
-```
+`--loop` 또는 `--loop N`이면 cycle brief를 append하고 사용자에게 보여준 뒤 Step 1로 돌아간다. 이어받은 cycle에서는 brief log의 run id와 git log를 확인해 현재 loop의 이전 cycle만 복원한다.
 
-**Standard 리포:** dev 브랜치도 최신화한다.
-
-```bash
-git checkout dev
-git pull origin dev
-git checkout -  # 원래 브랜치로 복귀
-```
-
----
-
-## Step 2 — 구현 후보 탐색 (`/codex:rescue` 위임)
-
-slash command로 `/codex:rescue --fresh --wait` 를 실행하여 다음 프롬프트를 전달하라.
-
-- `--fresh`: 이전 Codex rescue thread를 이어받지 않고 새 thread로 시작한다.
-- `--wait`: foreground로 완료까지 기다린다.
-- 금지: `Skill(codex:rescue)`, `Skill(codex:codex-rescue)`, `codex:codex-rescue` 직접 호출.
-  `codex:codex-rescue`는 `/codex:rescue` 내부 subagent 이름이다.
-
-`--phase <id>` 가 지정된 경우, 프롬프트에 "구현 대상: `<id>`" 를 명시하여 codex가 해당 Phase 범위에 집중하도록 한다.
-
----
-
-이 리포지토리의 문서, 로드맵, 코드, 테스트를 근거로 다음에 구현할 작업을 식별하라.
-문서는 구현 의도를 파악하기 위한 입력이며, 선택된 구현 작업의 acceptance criteria에
-필요한 문서 정합성 복구를 포함한다. 단, 구현 후보가 있는데 문서 수정만 하는 사이클로
-빠지지 마라.
-
-**수행 절차:**
-
-1. repo guidance, README, roadmap, architecture/testing docs 중 핵심 문서만 읽어라.
-2. 현재 구현 상태를 파악하라:
-   - `git log --oneline -30`으로 최근 커밋 흐름 확인
-   - 주요 소스 디렉토리 및 파일 탐색
-   - 관련 테스트와 TODO 탐색
-3. 구현 후보를 우선 식별하라:
-   - 문서/로드맵에 있지만 미구현된 기능
-   - 미완성 구현, TODO, 알려진 버그, 테스트 공백
-   - 구현은 있지만 검증/문서 갱신이 필요한 기능
-4. 문서 불일치는 구현 후보 판단과 acceptance criteria의 근거로 사용한다.
-   - 문서가 맞고 코드가 부족하면 **구현 작업**이다.
-   - 코드가 맞고 문서만 오래됐으면 **문서 작업**이다.
-   - 구현과 문서가 둘 다 필요하면 **구현 작업**으로 반환하고 문서 갱신을 acceptance criteria에 포함한다.
-   - 구현 도중 문서가 더 틀어질 수 있는 항목은 Step 4/5에서 같이 갱신하도록 명시한다.
-5. 다음 작업을 하나 도출하라.
-   - `--phase <id>` 가 지정된 경우, 해당 Phase 범위의 작업만 도출한다
-
-**반환 형식 — 아래 중 정확히 하나를 선택:**
-
-**## NEXT TASK**
-[다음 구현할 기능, 버그 수정, 테스트 보강, 또는 코드 개선 작업의 명확한 프롬프트. 파일/영역, acceptance criteria, 필요한 문서 갱신, 필요한 검증 포함.]
-
-**## DOC FIX NEEDED**
-[구현할 코드 작업이 없고 문서만 틀렸을 때만 선택. 파일명과 수정 내용을 포함한 구체적인 문서 수정 목록.]
-
-**## ALL CLEAR**
-[구현 작업도 문서 수정도 없을 때만 선택. 현재 상태 요약.]
-
----
-
-## Step 3 — 결과 판단 (Claude 실행)
-
-- **ALL CLEAR:** 사용자에게 현재 상태를 보고하고 중단한다.
-- **NEXT TASK:** Step 4로 진행, 작업 유형은 codex가 반환한 내용에 따라 결정
-- **DOC FIX NEEDED:** 구현 후보가 없고 문서만 틀린 경우에만 Step 4로 진행, 작업 유형은 `docs`
-
----
-
-## Step 4 — 브랜치 생성 & 구현 (Claude 실행)
-
-**브랜치 명명:** `<type>/<짧은-설명>`
-
-`<type>`은 conventional commit 타입 중 적절한 것을 사용한다:
-`feat` / `fix` / `docs` / `refactor` / `perf` / `test` / `chore` 등
-
-**Direct-push 리포:** 브랜치 생성 없이 `main`에서 직접 작업
-
-**Standard 리포:** 위 규칙에 따라 브랜치 생성 후 작업
-
-`--phase <id>` 가 지정된 경우, 해당 프로젝트 Phase에 해당하는 작업만 구현한다. 범위를 벗어난 작업은 하지 않는다.
-
-Step 2에서 받은 프롬프트(DOC FIX NEEDED 또는 NEXT TASK)를 실행한다.
-`NEXT TASK`인 경우 코드/테스트 변경을 우선 완료하되, Step 2가 명시한 문서 갱신은
-같은 사이클 안에서 함께 처리한다.
-
----
-
-## Step 5 — Verify (Claude 실행)
-
-`/verify` 커맨드를 실행한다.
-검증에는 구현 요구사항뿐 아니라 Step 2/4에서 식별한 문서 갱신 acceptance criteria도
-포함한다. 구현 완료 후 관련 thin docs가 실제 코드와 맞는지 확인하고 누락 시 같은
-사이클에서 수정한다.
-
-`/verify`가 완료되어 제어가 돌아오면 사용자 입력을 기다리지 말고 즉시 아래 기준으로
-분기한다:
-
-- verify가 pass이면 Step 6으로 진행한다.
-- verify가 누락을 수정했다면 수정 결과를 확인하고 Step 6으로 진행한다.
-- verify가 해결 불가 blocker를 보고했을 때만 사용자에게 blocker를 보고하고 멈춘다.
-
----
-
-## Step 6 — Code Review 루프 (Claude 실행)
-
-리뷰 루프 시작 전 `REVIEW_BASE`를 계산한다.
-
-### Direct-push diff 기준
-
-Direct-push 리포에서 `main...HEAD`가 비었다고 리뷰 대상이 없다고 판단하지 않는다.
-현재 작업이 `main` 위에 있으므로 로컬 변경사항을 별도로 확인해야 한다.
-
-- worktree/staged/untracked 변경이 있으면 `git diff`, `git diff --cached`,
-  `git ls-files --others --exclude-standard` 기준으로 현재 세션에서 직접 리뷰한다.
-- worktree가 clean이고 unpublished commit이 있으면 `origin/main...HEAD` 기준으로
-  `/codex:adversarial-review --base origin/main`을 실행한다.
-- `origin/main`이 없을 때만 `main...HEAD`를 fallback으로 사용한다.
-
-### 리뷰 스킬 선택 기준
-
-**Direct-push 리포:** 회차와 무관하게 위 "Direct-push diff 기준"으로 adversarial code-review를 수행한다. dirty worktree는 현재 세션에서 직접 리뷰하고, unpublished commit만 ref 기반 review 도구를 사용한다.
-
-**Standard 리포:** 구현 작업 규모를 판단한다.
-
-깊은 리뷰 필요 기준: 변경된 파일 5개 초과, 또는 새 기능/아키텍처 변경, 또는 보안·인증 관련 코드 포함
-
-| 회차 | 깊은 리뷰 필요 시 | 일반 시 |
-|------|-----------------|---------|
-| 1회차 | `/codex:adversarial-review --base "$REVIEW_BASE"` | `/codex:review --base "$REVIEW_BASE"` |
-| 2회차 | `/codex:adversarial-review --base "$REVIEW_BASE"` | `/codex:review --base "$REVIEW_BASE"` |
-| 3회차~ | `/codex:review --base "$REVIEW_BASE"` | `/codex:review --base "$REVIEW_BASE"` |
-
-### 루프 절차
-
-1. 위 기준에 따라 현재 회차에 맞는 리뷰를 **foreground**로 즉시 실행한다. bg/fg를 사용자에게 묻지 않는다.
-   Standard 리포에서 `/codex:*review`를 호출할 때는 `--base "$REVIEW_BASE"`를 붙인다.
-2. 리뷰 결과가 **pass**이면 Step 7로 진행한다
-3. 리뷰 결과에 지적 사항이 있으면 수정 후, 다음 회차 리뷰 스킬로 즉시 반복한다
-4. **5회 초과 시:** pass 여부와 무관하게 루프를 종료한다. 미해결 지적 사항은 `gh issue create`로 GitHub issue를 생성하고 (제목: `[review] <한 줄 요약>`, 본문: 미해결 항목 목록) Step 7로 진행한다. 멈추지 않는다.
-
----
-
-## Step 7 — 로컬 테스트 & CI 검증 (Claude 실행)
-
-프로젝트의 테스트 스위트와 정적 분석을 로컬에서 실행한다.
-
-**테스트 명령 자동 감지 순서:**
-- `Makefile` → `make test` 또는 `make ci`
-- `package.json` → `npm test` / `yarn test` / `bun test`
-- `pyproject.toml` / `pytest.ini` → `pytest`
-- `go.mod` → `go test ./...`
-- `Gemfile` → `bundle exec rspec` / `bundle exec rails test`
-- 위 어느 것도 없으면 사용자에게 확인 후 진행
-
-**검사 항목 (해당하는 것만):**
-- Unit test / integration test 전체 실행
-- 타입 체커 (tsc, mypy, pyright 등)
-- 린터 (eslint, rubocop, golangci-lint 등)
-- 빌드 검증 (`npm run build`, `go build` 등)
-
-**결과 분기:**
-- 전부 통과 → Step 8로 진행
-- 실패 → 원인 파악 후 수정, Step 7 재실행
-
----
-
-## Step 8 — Ship (Claude 실행)
-
-**Direct-push 리포:**
-
-```bash
-git push origin main
-```
-
-**Standard 리포:**
-
-1. `gh pr create --base "$REVIEW_BASE" --draft=false` 로 PR 생성 (제목/본문 적절히 작성)
-2. `/codex-loop` 커맨드를 실행한다
-3. codex-loop 완료 후 해당 PR을 `$REVIEW_BASE` 브랜치에 **squash merge**한다
-
----
-
-## 루프 재시작
-
-Step 8 완료 후 루프 모드에 따라 동작한다:
-
-| 모드 | 종료 조건 |
-|------|-----------|
-| `--loop` | Step 3에서 ALL CLEAR 반환 시 |
-| `--loop N` | N회 완료 시 (ALL CLEAR 무관) |
-
-**각 사이클 종료 시:** `/compact` 전에 반드시 "사이클 브리핑 로그" 절차를 수행한다.
-즉, 이번 사이클 브리핑을 출력하고 `$DEV_CYCLE_BRIEF_LOG`에 append한 뒤 `/compact`를
-실행해 컨텍스트를 요약·압축한다. `/compact`에 넘기는 요약에는
-`DEV_CYCLE_RUN_ID`, `DEV_CYCLE_BRIEF_LOG` 경로, 직전 Cycle 브리핑을 포함한다. 이후 Step 1부터 재시작한다.
-컨텍스트가 압축되더라도 `$DEV_CYCLE_BRIEF_LOG`, git log, 문서에서 이전 사이클 작업
-내역을 재확인할 수 있다.
-
-종료 시 총 실행 횟수, 마지막 상태, `$DEV_CYCLE_BRIEF_LOG` 기반 종합 브리핑을
-사용자에게 보고한다.
+종료 시 `"$DEV_CYCLE_HELPER" summary`를 근거로 전체 결과를 8줄 이내로 보고한다.
