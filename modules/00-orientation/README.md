@@ -24,7 +24,3 @@
 조심할 오해:
 다음 차시와 연결:
 ```
-
-## 이전 실습형 자료
-
-실습형 노트북과 예전 모듈은 [archive/practical-first-v1/modules](../../archive/practical-first-v1/modules)에 보존되어 있습니다. 필요할 때만 참고하고, 현재 학습의 기준 문서는 새 `modules/`입니다.
