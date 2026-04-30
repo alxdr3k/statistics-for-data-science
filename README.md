@@ -1,18 +1,18 @@
 # Data Science Lv3 — 기초부터 읽는 학습자료
 
-PDF 강의자료의 22차시 구성을 따라가되, **데이터 사이언스를 처음 공부하는 학습자**도 읽을 수 있도록 다시 쓰는 저장소입니다.
+PDF 강의자료의 22개 이론 차시와 2개 종합문제 차시 구성을 따라가되, **데이터 사이언스를 처음 공부하는 학습자**도 읽을 수 있도록 다시 쓰는 저장소입니다.
 
 이 자료의 기준은 “많이 아는 사람에게 압축해서 설명하기”가 아닙니다. 처음 보는 용어를 하나씩 풀고, 쉬운 예시로 이해한 뒤, PDF의 개념 이름과 연결하는 방식으로 작성합니다.
 
-현재 실제 학습자료 본문은 **22일차(22차시 심층 신경망)** 까지 작성했습니다.
+현재 실제 학습자료 본문은 **24일차(22개 이론 차시 + 2개 종합문제 차시)** 까지 작성했습니다. 원본 PDF 대비 포함 범위는 [SOURCE_COVERAGE.md](SOURCE_COVERAGE.md)에서 점검합니다.
 
 ## 여기서 시작
 
 1. 전체 흐름을 먼저 봅니다: [CURRICULUM.md](CURRICULUM.md)
 2. 학습 방식과 작성 기준을 확인합니다: [PEDAGOGY.md](PEDAGOGY.md)
-3. 누적 개념 사전을 옆에 둡니다: [GLOSSARY.md](GLOSSARY.md)
-4. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
-5. 현재 작성된 자료는 [modules/README.md](modules/README.md)에서 1~22차시 전체를 확인할 수 있습니다.
+3. 원본 PDF 포함 범위를 확인합니다: [SOURCE_COVERAGE.md](SOURCE_COVERAGE.md)
+4. 누적 개념 사전을 옆에 둡니다: [GLOSSARY.md](GLOSSARY.md)
+5. 작성된 학습자료로 들어갑니다: [modules/README.md](modules/README.md)
 
 ## 현재 구성
 
@@ -21,6 +21,7 @@ statistics-for-data-science/
 ├── README.md
 ├── CURRICULUM.md
 ├── PEDAGOGY.md
+├── SOURCE_COVERAGE.md
 ├── GLOSSARY.md
 ├── modules/
 │   ├── 00-orientation/
@@ -31,6 +32,8 @@ statistics-for-data-science/
 │   ├── 05-probability-distributions/
 │   ├── ...
 │   ├── 22-deep-neural-networks/
+│   ├── 23-comprehensive-review-1/
+│   ├── 24-comprehensive-review-2/
 │   └── README.md
 ├── archive/practical-first-v1/
 │   └── modules/        # 이전 실습형 자료 보존본
@@ -55,7 +58,7 @@ statistics-for-data-science/
 |---|---|
 | 1차시 | 60~120분. 본문 정독, 그림 확인, 예시 풀이, 확인 문제 |
 | 1블록 | 4~6차시. 낯선 용어를 자기 말로 바꾸는 데 집중 |
-| 전체 | 22차시. 데이터 이해에서 머신러닝과 신경망까지 천천히 연결 |
+| 전체 | 24차시. 데이터 이해에서 머신러닝과 신경망, 종합문제까지 천천히 연결 |
 
 ## 도구
 
