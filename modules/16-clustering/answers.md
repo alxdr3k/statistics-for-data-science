@@ -69,3 +69,24 @@ Core point는 eps 반경 안에 `min_samples` 이상 이웃이 있어 군집을 
 ## 15. 군집 수를 사전에 정하지 않아도 되는 군집화 모델을 설명하라.
 
 DBSCAN은 eps와 min_samples를 기준으로 밀집 영역을 연결하면서 군집 수가 수행 과정에서 정해진다. 계층적 군집화도 목표 군집 수를 직접 정할 수 있지만, 결합 임계값이나 덴드로그램 절단 높이를 기준으로 군집 수가 결정되게 할 수 있다. 반대로 k-means, k-medoids, GMM은 보통 K를 먼저 정해야 한다.
+
+## 16. 주요 거리 척도 공식과 코사인/마할라노비스 거리의 주의점을 설명하라.
+
+범주형 변수에는 해밍 거리와 자카드 거리를 쓸 수 있다.
+
+```text
+Hamming distance = number of positions where x_j != y_j
+Jaccard distance = 1 - |A intersect B| / |A union B|
+```
+
+연속형 변수에는 유클리디언, 맨해튼, 민코프스키, 코사인, 마할라노비스 거리를 자주 비교한다.
+
+```text
+Euclidean distance = sqrt(sum_j (x_j - y_j)^2)
+Manhattan distance = sum_j |x_j - y_j|
+Minkowski distance = (sum_j |x_j - y_j|^p)^(1/p)
+Cosine distance = 1 - (x^T y / (||x|| ||y||))
+Mahalanobis distance = sqrt((x - y)^T Sigma^-1 (x - y))
+```
+
+민코프스키 거리는 `p = 2`일 때 유클리디언 거리와 같다. 코사인 거리는 방향을 비교해 스케일 영향이 작고 고차원 희소 벡터에 유용하지만, 삼각부등식을 만족하지 않아 엄밀한 metric은 아니다. 마할라노비스 거리는 공분산행렬을 사용하므로 스케일 차이뿐 아니라 변수 간 상관관계까지 반영한다.

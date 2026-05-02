@@ -68,7 +68,30 @@
 
 처음에는 지표 이름을 모두 외우기보다 무엇을 벌하는지로 읽는다. 정확도는 전체 중 맞힌 비율, 정밀도는 양성이라고 예측한 것 중 진짜 양성 비율, 재현율은 실제 양성 중 찾아낸 비율, 특이도는 실제 음성 중 음성으로 맞힌 비율이다. F1은 정밀도와 재현율의 조화평균이다. MAE는 오차의 절댓값 평균이라 실제 단위로 이해하기 쉽고, RMSE는 큰 오차를 더 강하게 벌한다. AUC는 ROC curve 아래 면적으로, 임계값을 바꿔 가며 분류 모델이 양성과 음성을 얼마나 잘 구분하는지 본다.
 
+이진분류의 혼동행렬은 실제/예측이 각각 Positive, Negative일 때 네 칸으로 읽는다. `TP`는 실제 양성을 양성으로 맞힌 경우, `FP`는 실제 음성을 양성으로 잘못 예측한 경우, `FN`은 실제 양성을 음성으로 놓친 경우, `TN`은 실제 음성을 음성으로 맞힌 경우다.
+
+```text
+Accuracy = (TP + TN) / (TP + FP + FN + TN)
+Precision = TP / (TP + FP)
+Recall = TPR = TP / (TP + FN)
+Specificity = TN / (TN + FP)
+F1 = 2 * Precision * Recall / (Precision + Recall)
+FPR = FP / (TN + FP)
+```
+
 ROC curve의 x축은 False Positive Rate, y축은 True Positive Rate다. 낮은 FPR에서 높은 TPR을 유지할수록 양성과 음성을 더 잘 구분하는 모델이다.
+
+회귀 지표는 예측값 `yhat_i`와 실제값 `y_i`의 차이를 어떻게 요약하는지에 따라 다르다.
+
+```text
+MAE = (1 / n) * sum(|y_i - yhat_i|)
+MSE = (1 / n) * sum((y_i - yhat_i)^2)
+RMSE = sqrt(MSE)
+R^2 = 1 - sum((y_i - yhat_i)^2) / sum((y_i - ybar)^2)
+MAPE = (100 / n) * sum(|(y_i - yhat_i) / y_i|)
+```
+
+MAPE는 실제값 `y_i`가 0에 가깝거나 0이면 불안정해진다.
 
 ![분류 성능 지표](assets/classification-metrics-305.png)
 
@@ -104,7 +127,30 @@ ROC curve의 x축은 False Positive Rate, y축은 True Positive Rate다. 낮은 
 
 군집화의 실루엣 계수는 자기 군집 응집도와 다른 군집과의 분리도를 함께 본다. 같은 군집 안에서는 가까울수록 좋고, 다른 군집과는 멀수록 좋다.
 
+```text
+a(i) = 같은 군집 안 다른 샘플과의 평균거리
+b(i) = 다른 군집 샘플과의 평균거리 중 최솟값
+s(i) = (b(i) - a(i)) / max(a(i), b(i))
+```
+
+`s(i)`는 -1에서 1 사이 값을 갖는다. 1에 가까울수록 자기 군집에는 가깝고 다른 군집과는 멀다.
+
 편향-분산 분해는 일반화 오차를 세 부분으로 읽게 한다. 모델이 너무 단순해서 생기는 편향, 훈련 데이터가 바뀔 때 예측이 흔들리는 분산, 데이터 자체의 노이즈다. 모델 선택은 이 세 요소 중 줄일 수 있는 부분을 줄이는 과정이다.
+
+```text
+y = f(x) + epsilon
+E[epsilon] = 0
+E[epsilon^2] = sigma^2
+
+E_D[(f_hat(x) - y)^2]
+= (E_D[f_hat(x)] - f(x))^2
+  + E_D[(f_hat(x) - E_D[f_hat(x)])^2]
+  + sigma^2
+
+generalization error = Bias^2 + Variance + Irreducible Error
+```
+
+과소적합은 보통 편향이 큰 상태이고, 과대적합은 분산이 큰 상태다. 모델 유연성을 높이면 편향은 줄 수 있지만 분산이 커질 수 있으므로 검증 성능으로 균형점을 찾아야 한다.
 
 ## 판단 기준
 
@@ -163,6 +209,10 @@ ROC curve의 x축은 False Positive Rate, y축은 True Positive Rate다. 낮은 
 13. hold-out, cross validation, repeated validation의 차이를 설명하라.
 14. Stratified Split, Grouped Split, Time Series Split을 언제 쓰는지 설명하라.
 15. 실루엣 점수가 군집화에서 무엇을 보는지 설명하라.
+16. 이진분류 혼동행렬의 `TP`, `FP`, `FN`, `TN`과 Accuracy, Precision, Recall, Specificity, F1, FPR 공식을 쓰라.
+17. 회귀 성능 지표 MAE, MSE, RMSE, R2, MAPE의 공식을 쓰고 각각 무엇을 벌하는지 설명하라.
+18. 실루엣 계수의 `a(i)`, `b(i)`, `s(i)` 공식을 쓰고 값의 해석을 설명하라.
+19. 편향-분산 분해식에서 Bias, Variance, Irreducible Error가 각각 무엇을 뜻하는지 설명하라.
 
 ## 개념 주석
 

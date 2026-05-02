@@ -69,3 +69,53 @@ Stratified Split은 클래스 비율이 치우쳐 있어 훈련과 검증에서 
 ## 15. 실루엣 점수가 군집화에서 무엇을 보는지 설명하라.
 
 실루엣 점수는 한 점이 자기 군집 안의 다른 점들과 얼마나 가깝고, 다른 군집과는 얼마나 잘 떨어져 있는지를 함께 본다. 자기 군집 응집도가 높고 다른 군집과의 분리도가 크면 점수가 좋아진다. 군집 라벨의 정답이 없을 때 구조가 그럴듯한지 보는 내부 평가 지표다.
+
+## 16. 이진분류 혼동행렬의 `TP`, `FP`, `FN`, `TN`과 Accuracy, Precision, Recall, Specificity, F1, FPR 공식을 쓰라.
+
+`TP`는 실제 양성을 양성으로 맞힌 경우, `FP`는 실제 음성을 양성으로 잘못 예측한 경우다. `FN`은 실제 양성을 음성으로 놓친 경우, `TN`은 실제 음성을 음성으로 맞힌 경우다.
+
+```text
+Accuracy = (TP + TN) / (TP + FP + FN + TN)
+Precision = TP / (TP + FP)
+Recall = TPR = TP / (TP + FN)
+Specificity = TN / (TN + FP)
+F1 = 2 * Precision * Recall / (Precision + Recall)
+FPR = FP / (TN + FP)
+```
+
+ROC curve는 x축에 FPR, y축에 TPR을 둔다.
+
+## 17. 회귀 성능 지표 MAE, MSE, RMSE, R2, MAPE의 공식을 쓰고 각각 무엇을 벌하는지 설명하라.
+
+```text
+MAE = (1 / n) * sum(|y_i - yhat_i|)
+MSE = (1 / n) * sum((y_i - yhat_i)^2)
+RMSE = sqrt(MSE)
+R^2 = 1 - sum((y_i - yhat_i)^2) / sum((y_i - ybar)^2)
+MAPE = (100 / n) * sum(|(y_i - yhat_i) / y_i|)
+```
+
+MAE는 오차의 실제 크기를 평균 내므로 해석이 쉽다. MSE와 RMSE는 큰 오차를 더 강하게 벌한다. R2는 전체 변동 중 모델이 설명한 비율을 본다. MAPE는 상대 오차를 퍼센트로 보지만 실제값이 0에 가까우면 불안정하다.
+
+## 18. 실루엣 계수의 `a(i)`, `b(i)`, `s(i)` 공식을 쓰고 값의 해석을 설명하라.
+
+`a(i)`는 점 `i`가 같은 군집 안의 다른 샘플들과 떨어진 평균거리다. `b(i)`는 다른 군집들과의 평균거리 중 가장 작은 값이다.
+
+```text
+s(i) = (b(i) - a(i)) / max(a(i), b(i))
+```
+
+`s(i)`가 1에 가까우면 자기 군집에는 가깝고 다른 군집과는 멀다. 0 근처이면 경계에 있는 점일 수 있고, 음수이면 다른 군집에 더 가까운 점일 수 있다.
+
+## 19. 편향-분산 분해식에서 Bias, Variance, Irreducible Error가 각각 무엇을 뜻하는지 설명하라.
+
+일반화 오차는 다음처럼 분해해 읽는다.
+
+```text
+E_D[(f_hat(x) - y)^2]
+= (E_D[f_hat(x)] - f(x))^2
+  + E_D[(f_hat(x) - E_D[f_hat(x)])^2]
+  + sigma^2
+```
+
+첫 항은 Bias 제곱으로, 평균적인 예측이 참 함수에서 얼마나 떨어졌는지다. 둘째 항은 Variance로, 학습 데이터가 바뀔 때 예측이 얼마나 흔들리는지다. 셋째 항 `sigma^2`는 데이터 자체의 노이즈라 모델이 줄일 수 없는 오차다. 과소적합은 Bias가 큰 경우가 많고, 과대적합은 Variance가 큰 경우가 많다.

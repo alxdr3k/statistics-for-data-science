@@ -69,6 +69,16 @@
 
 선형성, 등분산성, 정규성, 독립성을 점검한다. 다중회귀에서는 독립변수끼리 너무 강하게 관련되는 <a id="ref-09-다중공선성"></a>[다중공선성](#note-09-다중공선성)도 본다.
 
+단순회귀와 다중회귀 모두 잔차가 다음 성질을 대체로 만족해야 계수 검정과 구간 해석이 믿을 만해진다.
+
+| 가정 | 의미 |
+|---|---|
+| 선형성 | 독립변수와 종속변수의 평균 관계를 선형식으로 표현할 수 있다. |
+| 등분산성 | 독립변수 수준이 달라져도 오차의 분산이 일정하다. |
+| 정규성 | 오차항이 `epsilon ~ N(0, sigma^2)`를 따른다고 본다. |
+| 독립성 | 관측치와 오차가 서로 독립이다. |
+| 다중공선성 없음 | 다중회귀에서 독립변수끼리 지나치게 강하게 겹치지 않는다. |
+
 ### 3. 모델 평가
 
 결정계수 R2는 종속변수 변동 중 모델이 설명한 비율이다. 조정 R2는 <a id="ref-09-변수"></a>[변수](#note-09-변수)가 늘어날 때의 과대평가를 줄이고, <a id="ref-09-aicbic"></a>[AIC/BIC](#note-09-aicbic)는 적합도와 복잡도를 함께 본다.
@@ -76,6 +86,14 @@
 최소제곱법은 `SSE = sum(yi - yhat_i)^2`를 최소화하는 계수를 찾는다. 단순회귀에서는 정규방정식을 풀면 기울기와 절편을 다음처럼 얻는다.
 
 ```text
+yi = beta0 + beta1 xi + epsilon_i
+yhat_i = beta0_hat + beta1_hat xi
+SSE = sum(yi - yhat_i)^2
+L(beta0_hat, beta1_hat) = sum(yi - beta0_hat - beta1_hat xi)^2
+
+dL / d beta0_hat = 0
+dL / d beta1_hat = 0
+
 beta1_hat = sum((xi - xbar)(yi - ybar)) / sum((xi - xbar)^2)
 beta0_hat = ybar - beta1_hat * xbar
 ```
@@ -83,6 +101,11 @@ beta0_hat = ybar - beta1_hat * xbar
 다중회귀에서는 같은 원리가 행렬식으로 정리된다.
 
 ```text
+y = X beta + epsilon
+yhat = X beta_hat
+L = SSE = (y - X beta_hat)^T(y - X beta_hat)
+gradient_beta_hat L = -2X^T(y - X beta_hat)
+
 beta_hat = (X^T X)^(-1) X^T y
 ```
 
@@ -102,13 +125,58 @@ beta_hat = (X^T X)^(-1) X^T y
 
 선형회귀는 `SST = SSR + SSE`로 설명한다. 전체 변동 `SST` 중 모델이 설명한 변동이 `SSR`, 남은 오차가 `SSE`다. 결정계수는 전체 변동 중 모델이 설명한 비율로 읽을 수 있지만, 변수를 많이 넣으면 올라가기 쉬우므로 수정 결정계수나 검증 성능도 함께 본다.
 
+```text
+SST = sum(yi - ybar)^2
+SSR = sum(yhat_i - ybar)^2
+SSE = sum(yi - yhat_i)^2
+SST = SSR + SSE
+
+R^2 = 1 - SSE / SST
+Adjusted R^2 = 1 - (SSE / (n - k)) / (SST / (n - 1))
+```
+
+여기서 `n`은 표본 수다. `k`는 절편을 포함하면 `p + 1`, 절편을 포함하지 않으면 `p`로 둔다. 절편이 있는 최소제곱 회귀에서는 잔차합이 0이 되고 잔차가 적합값과 직교하므로 `SST = SSR + SSE` 분해가 성립한다.
+
 AIC와 BIC는 적합도와 복잡도 사이의 균형을 보는 기준이다. 둘 다 값이 작을수록 선호하지만, BIC는 표본 수가 커질수록 복잡한 모델에 더 강한 벌점을 주는 경향이 있다. 따라서 단순히 훈련 오차가 작은 모델이 아니라 불필요하게 복잡하지 않은 모델을 고르는 데 쓴다.
+
+```text
+AIC = 2k - 2log(L)
+BIC = k log(n) - 2log(L)
+```
+
+`L = L(theta | X)`는 표본 `X`에 대한 최대우도다. 정규오차 선형회귀에서는 상수항을 제외하면 `SSE / n`이 작을수록 우도가 커진다. 따라서 AIC와 BIC는 오차를 줄이는 효과와 모수 수 `k`에 대한 벌점을 같이 반영한다.
 
 회귀모델 전체가 의미 있는지는 F검정으로 본다. 귀무가설은 `beta1 = beta2 = ... = betap = 0`, 즉 모든 독립변수가 의미 없다는 주장이다. 검정통계량은 `F = MSR / MSE = (SSR / (k - 1)) / (SSE / (n - k))`이고 우측꼬리검정을 한다.
 
 각 회귀계수가 의미 있는지는 t검정으로 본다. 귀무가설은 `beta_j = 0`이고, 검정통계량은 `t_j = beta_j_hat / SE(beta_j_hat)`이다. 계수 p-value가 작으면 해당 변수가 종속변수와 관련 있다는 증거가 된다. 단, 다중공선성이 크면 계수와 p-value가 불안정할 수 있다.
 
+```text
+H0: beta_j = 0
+H1: beta_j != 0
+
+t_j = beta_j_hat / SE(beta_j_hat) ~ t(n - k)
+SE(beta_j_hat) = sqrt(sigma_hat^2 * [(X^T X)^(-1)]_jj)
+sigma_hat^2 = SSE / (n - k)
+```
+
+`[(X^T X)^(-1)]_jj`는 행렬 `(X^T X)^(-1)`의 `j`번째 대각원소다. 계수 검정은 양측꼬리검정으로 해석한다.
+
 잔차 진단에서는 정규성, 등분산성, 독립성, 선형성을 확인한다. 정규성은 Q-Q plot, Jarque-Bera, Shapiro-Wilk 등으로 보고, 등분산성은 잔차 플롯에서 부채꼴 패턴이 있는지 본다. 이상점은 y값이 특이한 관측치이고, 영향점은 모델 계수를 크게 흔드는 관측치다. leverage, studentized residual, DFFITS, DFBETAS 같은 지표는 한 점이 회귀선에 얼마나 큰 영향을 주는지 보는 도구다.
+
+영향점 지표는 한 관측치를 제외했을 때 모델이 얼마나 달라지는지 본다. `x_i`는 절편까지 포함한 `i`번째 관측치의 설명변수 벡터다.
+
+```text
+leverage: h_ii = x_i^T (X^T X)^(-1) x_i
+
+MSE(-i) = SSE(-i) / (n - k - 1)
+studentized residual: t_i = e_i / sqrt(MSE(-i)(1 - h_ii))
+
+DFFITS_i = (yhat_i - yhat_i(-i)) / sqrt(MSE(-i)h_ii)
+DFBETAS_ij = (beta_j_hat - beta_j_hat(-i))
+             / sqrt(MSE(-i)[(X^T X)^(-1)]_jj)
+```
+
+leverage는 x공간에서 멀리 떨어진 정도, studentized residual은 y방향 잔차가 큰 정도, DFFITS와 DFBETAS는 예측값과 계수가 얼마나 흔들리는지를 본다.
 
 로지스틱 회귀에서 계수는 확률 자체의 변화가 아니라 log-odds의 변화로 해석한다. 다중 클래스에서는 OVR처럼 클래스를 하나씩 나누거나, softmax처럼 여러 클래스 확률을 한 번에 정규화하는 방식을 쓴다.
 
@@ -123,7 +191,22 @@ logit(p) = log(p / (1 - p)) = beta0 + beta1 X1 + ... + betap Xp
 p = 1 / (1 + exp(-z))
 ```
 
-계수 `beta_j`는 독립변수 `X_j`가 1 증가할 때 승산이 `exp(beta_j)`배가 된다는 뜻이다. 로지스틱 회귀의 계수는 닫힌형 해석식으로 바로 풀기 어려워 최대우도추정으로 구한다. 다중 클래스에서는 Softmax 회귀가 여러 클래스 확률을 함께 정규화하고, One-vs-Rest는 각 클래스를 나머지와 분리해 이진 문제 여러 개로 푼다.
+계수 `beta_j`는 독립변수 `X_j`가 1 증가할 때 승산이 `exp(beta_j)`배가 된다는 뜻이다. 로지스틱 회귀의 계수는 닫힌형 해석식으로 바로 풀기 어려워 최대우도추정으로 구한다.
+
+```text
+P(Y = 1 | X = x_i) = sigma(z_i) = 1 / (1 + exp(-z_i))
+z_i = beta^T x_i
+
+P(Y = y_i | X = x_i)
+= sigma(z_i)^y_i * (1 - sigma(z_i))^(1 - y_i)
+
+L(beta) = product_i sigma(z_i)^y_i * (1 - sigma(z_i))^(1 - y_i)
+log L(beta) = sum_i [y_i log sigma(z_i)
+              + (1 - y_i)log(1 - sigma(z_i))]
+beta_hat = argmax L(beta)
+```
+
+다중 클래스에서는 Softmax 회귀가 여러 클래스 확률을 함께 정규화하고, One-vs-Rest는 각 클래스를 나머지와 분리해 이진 문제 여러 개로 푼다. One-vs-One은 클래스 쌍마다 분류기를 만들어 비교한다.
 
 ## 판단 기준
 
@@ -183,6 +266,12 @@ p = 1 / (1 + exp(-z))
 14. VIF 기준과 다중공선성 대응 방법을 설명하라.
 15. 로지스틱 회귀에서 `exp(beta)`를 어떻게 해석하는지 설명하라.
 16. Softmax 방식과 One-vs-Rest 방식의 차이를 설명하라.
+17. 단순 선형회귀의 최소제곱 목적함수와 `beta0_hat`, `beta1_hat` 식을 쓰라.
+18. 다중회귀의 행렬식 `beta_hat = (X^T X)^(-1)X^T y`가 어떤 조건에서 나오는지 설명하라.
+19. `R^2`, 조정 `R^2`, AIC, BIC가 각각 모델을 어떤 관점에서 평가하는지 설명하라.
+20. 회귀계수 t검정에서 `SE(beta_j_hat)`와 `sigma_hat^2`가 어떻게 계산되는지 쓰라.
+21. leverage, studentized residual, DFFITS, DFBETAS가 각각 무엇을 진단하는지 설명하라.
+22. 로지스틱 회귀의 likelihood와 log-likelihood 식을 쓰고, 해석적 해가 어려운 이유를 설명하라.
 
 ## 개념 주석
 

@@ -63,6 +63,21 @@
 
 유클리디언, 맨해튼, 코사인, 마할라노비스 거리 등은 가까움을 다르게 정의한다. <a id="ref-16-변수"></a>[변수](#note-16-변수) 타입과 질문에 맞게 고른다. 범주형 변수에는 해밍 거리와 자카드 거리를 쓸 수 있고, 연속형 변수에는 유클리디언, 맨해튼, 민코프스키, 코사인, 마할라노비스 거리를 자주 비교한다.
 
+```text
+Hamming distance = number of positions where x_j != y_j
+Jaccard distance = 1 - |A intersect B| / |A union B|
+
+Euclidean distance = sqrt(sum_j (x_j - y_j)^2)
+Manhattan distance = sum_j |x_j - y_j|
+Minkowski distance = (sum_j |x_j - y_j|^p)^(1/p)
+  p = 2이면 Euclidean distance
+
+Cosine distance = 1 - (x^T y / (||x|| ||y||))
+Mahalanobis distance = sqrt((x - y)^T Sigma^-1 (x - y))
+```
+
+코사인 거리는 벡터 크기보다 방향을 비교하므로 스케일의 영향을 덜 받지만, 삼각부등식을 만족하지 않아 엄밀한 거리(metric)는 아니다. 마할라노비스 거리는 공분산행렬 `Sigma`를 이용해 각 차원의 스케일 차이와 변수 간 상관관계를 함께 반영한다.
+
 ![군집화의 기본 정의](assets/clustering-intuition-428.png)
 
 > **그림 읽기**: 정답 없이 비슷한 점끼리 묶는 구조를 본다. 가까움의 정의가 군집 결과를 만든다.
@@ -184,6 +199,7 @@ k-means는 k를 사용자가 정해야 한다. elbow나 silhouette은 참고 도
 13. GMM의 책임도 `gamma_ik`가 무엇인지 설명하라.
 14. DBSCAN의 core point, border point, noise point를 구분하라.
 15. 군집 수를 사전에 정하지 않아도 되는 군집화 모델을 설명하라.
+16. 주요 거리 척도 공식과 코사인/마할라노비스 거리의 주의점을 설명하라.
 
 ## 개념 주석
 

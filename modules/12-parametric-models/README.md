@@ -78,11 +78,41 @@ theta = theta - eta * gradient(J(theta))
 
 여기서 `J(theta)`는 목적함수이고, `eta`는 학습률이다. 선형회귀에 적용하면 MSE를 목적함수로 두고, 예측값 `yhat_i = w^T x_i + b`와 실제값의 차이를 이용해 `w`와 `b`의 기울기를 계산한다.
 
+```text
+yhat_i = w^T x_i + b
+J = (1 / N) * sum_i (y_i - yhat_i)^2
+
+gradient_w J = (-2 / N) * sum_i x_i(y_i - yhat_i)
+             = (-2 / N) * X^T(y - yhat)
+
+dJ / db = (-2 / N) * sum_i (y_i - yhat_i)
+
+w = w - eta * gradient_w J
+b = b - eta * dJ/db
+```
+
 과정은 `모수 초기화 -> 손실과 기울기 계산 -> 모수 업데이트 -> 종료조건 확인`을 반복한다. 에폭(epoch)은 학습 데이터를 모두 사용해 한 번 학습을 완료한 단위다. 큰 데이터에서는 전체 데이터를 한 번에 메모리에 올리지 않고 배치(batch)로 나누어 학습할 수 있다.
 
 ### 3. L1과 L2 규제
 
 L1은 일부 가중치를 0으로 만들어 <a id="ref-12-변수"></a>[변수](#note-12-변수) 선택 효과가 있고, L2는 가중치를 전반적으로 작게 만들어 안정화한다. 둘을 함께 쓰면 Elastic Net이다.
+
+규제는 기존 손실 함수에 가중치 크기에 대한 벌점을 더한다.
+
+```text
+기본 손실 = sum_i (y_i - yhat_i)^2
+
+L1 penalty = sum_j |beta_j|
+L2 penalty = sum_j beta_j^2
+
+Lasso loss = sum_i (y_i - yhat_i)^2 + alpha * sum_j |beta_j|
+Ridge loss = sum_i (y_i - yhat_i)^2 + lambda * sum_j beta_j^2
+Elastic Net loss = sum_i (y_i - yhat_i)^2
+                   + alpha * sum_j |beta_j|
+                   + lambda * sum_j beta_j^2
+```
+
+L1은 `beta_j = 0`에서 미분 불가능하고, 0 양쪽에서 기울기가 일정하게 작용한다. 이 성질 때문에 일부 계수가 정확히 0이 되기 쉽다. L2의 도함수는 `2beta_j`라서 큰 계수일수록 더 강하게 줄이지만, 보통 정확히 0으로 만들지는 않는다.
 
 ![규제의 직관](assets/regularization-333.png)
 
@@ -95,6 +125,15 @@ L1은 일부 가중치를 0으로 만들어 <a id="ref-12-변수"></a>[변수](#
 나이브 베이즈는 베이즈 정리에서 시작한다. 모든 클래스 `c`에 대해 `P(y=c) * product(P(X_i=x_i | y=c))`를 비교하고 가장 큰 클래스를 고른다. 곱셈이 길어지면 값이 너무 작아지는 underflow가 생길 수 있으므로 실제 계산에서는 로그를 취해 더한다.
 
 ```text
+P(y = c | X1 = x1, ..., Xk = xk)
+= P(X1 = x1, ..., Xk = xk | y = c)P(y = c)
+  / P(X1 = x1, ..., Xk = xk)
+
+조건부 독립 가정:
+P(X1 = x1, ..., Xk = xk | y = c)
+= product_i P(X_i = x_i | y = c)
+
+yhat = argmax_c P(y = c) * product_i P(X_i = x_i | y = c)
 yhat = argmax_c [log P(y=c) + sum_i log P(X_i=x_i | y=c)]
 ```
 
@@ -111,6 +150,30 @@ yhat = argmax_c [log P(y=c) + sum_i log P(X_i=x_i | y=c)]
 평활화는 관측되지 않은 조합의 확률이 0이 되는 문제를 막는다. 단어 분류에서 어떤 클래스에 특정 단어가 한 번도 나오지 않았다는 이유만으로 전체 사후확률이 0이 되면 지나치게 단정적이므로, 작은 가짜 카운트를 더해 확률을 안정화한다.
 
 Bernoulli NB에서는 0/1 특징의 등장 확률을, Multinomial NB에서는 여러 사건의 발생 빈도 확률을 평활화한다. `alpha = 1`이면 Laplace Smoothing, `alpha > 0`이면 Lidstone Smoothing이라고 부른다. alpha가 작아질수록 관측 데이터에 더 민감해져 분산이 커질 수 있고, alpha가 커질수록 확률을 더 평평하게 만들어 편향이 커질 수 있다.
+
+사전확률은 클래스별 관측 비율로 추정한다.
+
+```text
+P(y = c) = sum_i 1(y_i = c) / n
+```
+
+Bernoulli NB는 0/1 특징의 조건부 확률을 추정한다.
+
+```text
+P(X_i = x_i | y = c) = p^x_i(1 - p)^(1 - x_i)
+p = (sum_i x_i + alpha) / (n + 2alpha)
+```
+
+Multinomial NB는 카운트 벡터의 다항분포를 쓴다.
+
+```text
+P(X1 = x1, ..., Xk = xk)
+= n! / (x1! ... xk!) * p1^x1 ... pk^xk
+
+p_j = (sum_i x_ij + alpha) / (sum_i sum_l x_il + k alpha)
+```
+
+Gaussian NB는 연속형 특징을 클래스별 정규분포로 보고, 각 클래스 안에서 평균과 분산을 추정해 조건부 밀도를 계산한다.
 
 ## 판단 기준
 
@@ -169,6 +232,10 @@ L1 벌점은 일부 가중치를 정확히 0으로 만들 수 있다. 그래서 
 13. 경사하강법의 업데이트식과 에폭, 배치의 의미를 설명하라.
 14. 나이브 베이즈에서 로그를 취해 계산하는 이유를 설명하라.
 15. Laplace Smoothing과 Lidstone Smoothing, alpha의 편향-분산 효과를 설명하라.
+16. 선형회귀 MSE 목적함수에서 `w`와 `b`의 경사하강법 기울기 식을 쓰라.
+17. Ridge, Lasso, Elastic Net의 손실 함수와 규제항을 각각 쓰라.
+18. 나이브 베이즈의 베이즈 정리 유도, 조건부 독립 가정, 로그 점수 식을 순서대로 설명하라.
+19. Bernoulli NB와 Multinomial NB의 평활화 공식을 쓰고 `alpha`가 하는 일을 설명하라.
 
 ## 개념 주석
 
