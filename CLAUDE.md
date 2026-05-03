@@ -1,3 +1,4 @@
+@AGENTS.policy.md
 # Project: statistics-for-data-science
 
 ## Git Branch Policy (이 프로젝트 한정)
