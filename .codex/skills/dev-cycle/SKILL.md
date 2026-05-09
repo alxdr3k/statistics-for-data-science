@@ -4,9 +4,9 @@ description: "전체 개발 사이클: sync -> discover -> implement -> verify -
 ---
 <!-- my-skill:generated
 skill: dev-cycle
-base-sha256: 05589aff7e5943169b889dbe661fa0307f301d1e3a98da3cad6304019a6a0e4e
+base-sha256: 0696d16a2a8c196aa6eb6a4452cbe7fa24ca8e9b6c0afed1786e4a26c6b419f7
 overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-output-sha256: 05589aff7e5943169b889dbe661fa0307f301d1e3a98da3cad6304019a6a0e4e
+output-sha256: 0696d16a2a8c196aa6eb6a4452cbe7fa24ca8e9b6c0afed1786e4a26c6b419f7
 do-not-edit: edit .codex/skill-overrides/dev-cycle.md instead
 -->
 
@@ -204,7 +204,7 @@ REVIEW_DOSSIER_JSON="$("$DEV_CYCLE_HELPER" review-dossier)"
 - 유효한 finding은 가장 합리적인 해결 방식을 고른다: root-cause code fix, test 보강, 문서/계약 정정, 요구사항 clarification, 또는 사용자 결정 요청. 리뷰를 만족시키려고 보안/검증/계약을 약화하거나 symptom-only patch를 만들지 않는다.
 - 버그, regression, missing test, security/auth/data-loss, schema/runtime/docs 불일치 findings를 batch로 정리한다. actionable finding은 같은 cycle에서 한 번에 수정하고 targeted verify 후 Review Pass를 반복한다.
 - fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로 본다.
-- 최대 5회 반복한다. 5회 후 남은 actionable finding은 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 `update_plan` 체크박스에 `[Review pass N/5]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
+- 합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. adversarial 평가 후 이번 pass의 actionable finding이 0이면 종료하고 Step 7로 간다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 `update_plan` 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
 
 ## Step 7 - Local Checks
 

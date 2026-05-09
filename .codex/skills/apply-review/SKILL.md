@@ -5,9 +5,9 @@ argument-hint: [review text, PR/comment URL, or path to review notes]
 ---
 <!-- my-skill:generated
 skill: apply-review
-base-sha256: 124ca9c5a0ae7ab608fa3917ae47c47b1acb234e949d045ee790cd4373ea6f58
+base-sha256: 2c7fba46e9b4741bc90cc4626994521b0a9e981b7beab07d117338bc36436008
 overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-output-sha256: 124ca9c5a0ae7ab608fa3917ae47c47b1acb234e949d045ee790cd4373ea6f58
+output-sha256: 2c7fba46e9b4741bc90cc4626994521b0a9e981b7beab07d117338bc36436008
 do-not-edit: edit .codex/skill-overrides/apply-review.md instead
 -->
 
@@ -72,4 +72,4 @@ Each plan item must be small enough that its execution won't approach response o
 - **User-facing language**: summarize review feedback, progress, questions, and final reports in Korean. Keep code, commands, filenames, and quoted source text in their original language.
 - **Project conventions**: respect `AGENTS.md` and existing repo guidance/code style when present. If a review item conflicts with a project rule, flag it and follow the rule.
 - **Commits**: do not commit unless the review or project workflow explicitly requests it. If `$ARGUMENTS` is a PR/comment URL, treat that as a request to commit fixes per the project's branching policy. If commits are expected, pair test + implementation per the project's TDD rules.
-- **Secrets / destructive ops**: never fix a review item by weakening a security check, skipping hooks, or force-pushing.
+- **Secrets / destructive ops**: never fix a review item by weakening a security check or skipping hooks.

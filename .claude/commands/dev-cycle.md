@@ -219,7 +219,7 @@ Direct-push repo는 회차와 무관하게 항상 `/codex:adversarial-review`를
 - 리뷰 결과는 그대로 수용하지 말고 적대적/비판적으로 재평가한다. 각 finding마다 주장, 근거, 재현 가능성, 실제 영향, severity, 범위 적합성을 확인하고 duplicate/이미 처리됨/추측성 edge/단순 취향이면 근거와 함께 제외한다.
 - 유효한 finding은 가장 합리적인 해결 방식을 고른다: root-cause code fix, test 보강, 문서/계약 정정, 요구사항 clarification, 또는 사용자 결정 요청. 리뷰를 만족시키려고 보안/검증/계약을 약화하거나 symptom-only patch를 만들지 않는다.
 - findings는 batch로 정리한다. actionable finding은 같은 cycle에서 한 번에 수정하고 targeted verify 후 Review Pass를 반복한다. fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로 본다.
-- 최대 5회 반복한다. 5회 후 남은 actionable finding은 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 TodoWrite 체크박스에 `[Review pass N/5]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
+- 합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. adversarial 평가 후 이번 pass의 actionable finding이 0이면 종료하고 Step 7로 간다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 TodoWrite 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
 
 ## Step 7 - Local Checks
 
