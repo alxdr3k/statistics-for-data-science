@@ -4,9 +4,9 @@ description: "전체 개발 사이클: sync -> discover -> implement -> verify -
 ---
 <!-- my-skill:generated
 skill: dev-cycle
-base-sha256: 88f85d5a7cc771ed95107dcf985b88879cace43230c946e2db5b96e6904ecc5f
+base-sha256: e414e412211f0a842339f7c835d7d84f111f1c05a676a8f309ef00fd50a1578d
 overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-output-sha256: 88f85d5a7cc771ed95107dcf985b88879cace43230c946e2db5b96e6904ecc5f
+output-sha256: e414e412211f0a842339f7c835d7d84f111f1c05a676a8f309ef00fd50a1578d
 do-not-edit: edit .codex/skill-overrides/dev-cycle.md instead
 -->
 
@@ -67,6 +67,10 @@ Cycle 종료 시 JSON payload를 `finish-cycle-json` stdin으로 넘긴다. **AL
   "changes": [
     {"path": "수정 파일 또는 영역", "summary_ko": "선택"}
   ],
+  "design_risk": {"level": "low|medium|high", "triggers": ["선택"], "summary_ko": "선택"},
+  "design_decisions": [
+    {"risk_ko": "선택", "chosen_pattern_ko": "선택", "invariant_ko": "선택", "tests_ko": "선택", "residual_risk_ko": "선택"}
+  ],
   "change_scope": {"kind": "docs_only_contract", "changed_files_count": 2, "contract_surface": true, "review_required": true},
   "verification_plan": {"profile": "docs_contract", "full_ci_required": false},
   "verification": [
@@ -89,7 +93,7 @@ Cycle 종료 시 JSON payload를 `finish-cycle-json` stdin으로 넘긴다. **AL
 JSON
 ```
 
-필수 필드: `schema_version`, `cycle`, `result`, `actions`, `conclusion.summary_ko`, `verification`, `review_land`, `risks`. `review_ship`은 legacy alias로만 허용한다. `cycle`은 1부터 시작하는 정수이고, `actions`와 `verification`은 비어 있으면 안 되며 각 항목에 사용자-visible `summary_ko`를 쓴다. 권장 `result` 값은 `landed`, `blocked`, `all_clear`, `doc_fix_needed`다. 리스크가 없으면 `risks: []`를 쓴다. Ready slice가 없어 `ALL CLEAR`로 끝낼 때는 실제 수행한 탐색/판단을 `actions`와 `conclusion`에 쓰고, ready가 아닌 다음 검토 후보는 최대 3개까지 `next_candidates`에 둔다. 자동 승격을 검토했다면 `auto_promotion_candidates`에 검토한 후보와 가능/불가 이유를 쓰고, 실제 승격한 항목은 `auto_promotions`에 쓴다. `change_scope`, `verification_plan`, 후보/승격 필드는 schema_version 1의 optional extension이다. 후보는 후속 안내이지 risk issue 대상이 아니므로 실제 리스크가 없으면 `risks: []`다.
+필수 필드: `schema_version`, `cycle`, `result`, `actions`, `conclusion.summary_ko`, `verification`, `review_land`, `risks`. `review_ship`은 legacy alias로만 허용한다. `cycle`은 1부터 시작하는 정수이고, `actions`와 `verification`은 비어 있으면 안 되며 각 항목에 사용자-visible `summary_ko`를 쓴다. 권장 `result` 값은 `landed`, `blocked`, `all_clear`, `doc_fix_needed`다. 리스크가 없으면 `risks: []`를 쓴다. Ready slice가 없어 `ALL CLEAR`로 끝낼 때는 실제 수행한 탐색/판단을 `actions`와 `conclusion`에 쓰고, ready가 아닌 다음 검토 후보는 최대 3개까지 `next_candidates`에 둔다. 자동 승격을 검토했다면 `auto_promotion_candidates`에 검토한 후보와 가능/불가 이유를 쓰고, 실제 승격한 항목은 `auto_promotions`에 쓴다. `change_scope`, `verification_plan`, `design_risk`, `design_decisions`, 후보/승격 필드는 schema_version 1의 optional extension이다. 후보는 후속 안내이지 risk issue 대상이 아니므로 실제 리스크가 없으면 `risks: []`다.
 
 `finish-cycle-json` stdout은 tool output일 뿐 사용자에게 자동 전달되지 않는다. stdout ack JSON에서 `rendered_markdown`만 추출해 사용자에게 그대로 보여준다. 이 메시지가 사용자에게 보이기 전에는 다음 `update_plan`, Step 1, Step 2, discovery, 파일 탐색, 또는 tool call을 하지 않는다. 한 줄짜리 "사이클 N 완료" 요약으로 대체하면 안 된다. `--loop` 또는 `--loop N`이면 user-visible brief를 보낸 뒤 ack의 `auto_promotions_count`로 loop 지속 여부를 판단한다.
 
@@ -185,8 +189,8 @@ echo "Review base: $REVIEW_BASE"
 ## Step 3 - Decide
 
 - **ALL CLEAR**: 종료하기 전에 Auto-Promotion Gate를 실행한다.
-- **NEXT TASK**: Step 4로 간다.
-- **DOC FIX NEEDED**: Step 4로 가되 작업 type은 `docs`.
+- **NEXT TASK**: Step 3.5로 간다.
+- **DOC FIX NEEDED**: Step 3.5로 가되 작업 type은 `docs`.
 
 ### Auto-Promotion Gate
 
@@ -202,12 +206,56 @@ Step 2가 **ALL CLEAR**를 반환하면 아래 순서로 ready 자동 승격 가
 
 `--loop`가 아닌 실행에서는 자동 승격 후 새로 ready가 된 작업을 같은 invocation에서 구현하지 않는다. 승격 내역을 brief에 남기고 종료한다. `--loop` 실행에서는 승격 변경이 원격 반영된 뒤 user-visible brief를 보여주고 다음 cycle로 계속 진행한다.
 
+## Step 3.5 - Design Risk Gate
+
+구현 전에 semantic design risk를 분류한다. 이 gate는 Review Pass를 약화하지 않으며, reviewer가 설계를 새로 발견하게 두지 않고 이미 잠긴 설계를 검증하게 만들기 위한 것이다.
+
+### Risk Trigger
+
+아래 trigger가 2개 이상이면 기본값은 **medium** 이상이다. 하나라도 failure blast radius가 크거나 외부 비용/데이터 손상이 가능하면 **high**로 올린다.
+
+- concurrency, heartbeat, lease, reservation, recovery, retry, idempotency, worker ownership
+- schema, migration, backfill, audit ledger, data repair, persistence
+- external API, LLM call, billing/cost accounting, transport failure, partial success
+- auth, security, policy, permission, secret handling
+- public CLI/output, command/skill contract, deploy/build/test infra
+- multi-surface 반영 필요: `commands/`, `codex/skills/`, `.agents/scripts/`, docs/tests가 같은 계약을 공유
+- Step 2의 acceptance 또는 reviewer prompt에 "adversarial focus"가 필요하지만 대응 pattern이 아직 정해지지 않은 경우
+
+### Route
+
+- **Low**: main session이 1-3줄 design note를 `actions` 또는 `conclusion`에 남기고 Step 4로 간다.
+- **Medium**: main session이 최소 2개 대안을 비교하고 `design_risk` / `design_decisions`에 선택 근거를 남긴 뒤 Step 4로 간다.
+- **High**: 구현 전에 현재 환경에서 허용된 read-only design reviewer를 호출한다. 사용할 수 있으면 `/codex:rescue`를 우선하고, 그렇지 않으면 같은 세션에서 read-only design review를 수행한다. reviewer 결과는 그대로 위임하지 말고 main session이 아래 matrix로 압축해 최종 결정을 잠근다.
+
+### Design Decision Matrix
+
+High/medium risk 작업은 "위험 인식"만 기록하지 않는다. 각 의미 있는 risk마다 아래 형식으로 구체화한다.
+
+```text
+risk -> chosen pattern -> rejected alternatives -> invariant -> required tests -> residual risk
+```
+
+예시:
+
+```text
+Risk: stale worker release
+Chosen pattern: reservation_token fencing
+Rejected alternatives: worker_id-only ownership because worker_id reuse can release newer work
+Invariant: release/heartbeat/sweep must match token, not worker_id alone
+Required tests: reused worker_id cannot release a newer reservation
+Residual risk: manual repair remains operator-only
+```
+
+논문, 블로그, vendor experience report를 참고할 수 있지만 citation 자체를 권위로 취급하지 않는다. 출처 유형(peer-reviewed paper, white paper, arXiv preprint, blog, vendor report), 실험 범위, 전제, 현재 repo 문제와의 차이를 짧게 적고, paper는 결정 근거가 아니라 risk lens로 사용한다. repo evidence 또는 현재 incident 관찰 없이 paper만으로 workflow rule을 강제하지 않는다.
+
 ## Step 4 - Implement
 
 - Direct-push repo: `main`에서 직접 작업한다.
 - Standard repo: 작업 전 현재 branch를 확인한다. 현재 branch가 `$REVIEW_BASE` 또는 default/base branch이면 구현 전에 `codex/<short-description>` 또는 `<type>/<short-description>` 작업 브랜치를 새로 만든다. 이미 non-base 작업 브랜치면 유지한다.
 - Standard repo에서는 작업 브랜치 이름을 `DEV_CYCLE_WORK_BRANCH`로 기록해 Step 8 push, Step 9 merge/cleanup에서 같은 브랜치를 사용한다. base branch에서 직접 구현하지 않는다.
 - `update_plan`으로 작은 작업 단위를 만들고, 수동 편집은 `apply_patch`를 사용한다.
+- Step 3.5에서 medium/high design decision matrix가 작성됐다면 그 invariant와 required tests를 구현 scope에 포함한다. 구현 중 선택한 pattern이 틀렸다고 드러나면 조용히 우회하지 말고 Step 3.5 matrix를 갱신한 뒤 계속한다.
 - Step 2의 task/slice를 구현한다. docs update가 acceptance criteria면 같은 cycle에서 처리한다.
 - `--phase <id>` 범위를 벗어난 작업은 하지 않는다.
 
@@ -240,6 +288,7 @@ REVIEW_DOSSIER_JSON="$("$DEV_CYCLE_HELPER" review-dossier)"
 - `CHANGE_SCOPE_JSON.review_inputs`에 있는 base range, staged diff, unstaged diff, untracked files를 모두 리뷰한다.
 - `REVIEW_DOSSIER_JSON.review_dossier`는 diff 크기, 파일 확산, 계약/중요 경로처럼 script가 계산 가능한 신호만 담는다. dossier가 없거나 helper가 실패하면 `CHANGE_SCOPE_JSON`과 아래 위험 trigger를 수동으로 적용한다.
 - `review_dossier.risk_triggers`는 200/400라인 초과, 변경 파일 5개 초과, 보안/영속성/설정/배포/공개 command 경로 같은 휴리스틱 위험 신호다. reviewer 입력 정보로 참고한다.
+- Step 3.5에서 `design_risk` / `design_decisions`를 만들었다면 reviewer 입력에 matrix와 residual risk를 포함한다. reviewer에게 "corner를 찾아라"만 요청하지 말고, 각 corner의 chosen pattern / invariant / required tests가 구현됐는지 검증하게 한다.
 - Direct-push repo와 Standard repo 모두 같은 입력 규칙을 쓴다. Standard repo도 `$REVIEW_BASE...HEAD`만 보지 않는다. commit 전 local diff와 untracked files가 있으면 반드시 Review Pass 입력에 포함한다.
 - Review Pass는 diff review와 impact triage/scan이 함께 통과한 상태다. impact scan을 review OK 이후 별도 단계로 두지 않는다.
 - Impact triage: docs/typo/slice/test-only처럼 외부 surface가 없으면 `Impact: local only`로 끝낸다.
@@ -258,6 +307,15 @@ REVIEW_DOSSIER_JSON="$("$DEV_CYCLE_HELPER" review-dossier)"
 4. 유효한 actionable finding이 **있으면**: batch 수정 → targeted verify → **1로 돌아가 리뷰어를 반드시 재실행한다**
 
 버그, regression, missing test, security/auth/data-loss, schema/runtime/docs 불일치 findings를 batch로 정리한다. fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로 본다.
+
+### Review Burn Controller
+
+반복 리뷰는 pass 조건을 약화하지 않는다. 다만 같은 design class의 finding이 계속 나오면 더 많은 patch/review 반복이 아니라 design regroup 신호로 취급한다.
+
+- **3회차**: 같은 파일군 또는 같은 risk class에서 반복 finding이 있으면 Step 3.5 matrix를 다시 열고, 누락된 pattern/invariant/test를 명시한다.
+- **5회차**: 사용자에게 짧은 중간 브리핑을 남긴다. 현재 유효 finding 수, 반복되는 risk class, design regroup 여부, 다음 pass 목표를 기록한다.
+- **8회차**: design issue가 아직 새로 발견되는 중이면 read-only design reviewer(`/codex:rescue` 또는 현재 환경에서 허용된 reviewer)를 호출하거나, 사용자 결정이 필요한 항목을 issue로 분리한다. 단순히 review command만 계속 반복하지 않는다.
+- **12회차 이후**: normal review loop가 아니라 incident mode로 취급한다. 남은 finding을 root cause category로 묶고, 계속 진행/분리/중단 중 안전한 선택지를 사용자에게 보고한다.
 
 합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 `update_plan` 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
 
