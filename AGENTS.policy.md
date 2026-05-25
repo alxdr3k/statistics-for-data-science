@@ -11,6 +11,28 @@ Project-specific guidance belongs in `AGENTS.md`.
 - Separate planning from execution: record known scope with status, but execute only ready and authorized work.
 - Verify goals: turn work into checkable outcomes, run documented checks, and report any validation you could not run.
 
+## Branch and merge workflow
+
+All repos use the same workflow unless a repo-local emergency runbook says
+otherwise for a production incident.
+
+- `main` is the single base and release branch.
+- Do not commit or push directly on `main`.
+- Do not use `dev` as an integration branch for normal work.
+- Start each change from an up-to-date `main` branch in a separate worktree:
+  `git fetch origin main` followed by
+  `git worktree add ../<repo>-<branch> -b <branch> origin/main`.
+- If the branch already exists, attach it with
+  `git worktree add ../<repo>-<branch> <branch>` instead of switching the
+  existing `main` checkout.
+- Keep the `main` checkout clean for sync, review-base checks, and post-merge
+  verification. Do implementation work only in the task worktree.
+- Push the task branch, open a PR to `main`, and merge with squash
+  (`gh pr merge --squash --delete-branch`) after required checks and reviews
+  pass.
+- If squash merge is unavailable because of repository settings, stop and
+  report the blocker instead of choosing another merge strategy.
+
 ## Validation
 
 Prefer terse output flags to reduce context size:
@@ -41,6 +63,165 @@ Do not read generated or lock files (`package-lock.json`, `Gemfile.lock`, `yarn.
 Do not invent commands.
 
 If validation cannot be run, report why.
+
+## Operator decision requests
+
+When an agent needs the operator (the human supervising the session) to pick
+between options or approve a non-trivial action, the request body MUST follow
+this schema. The canonical definition lives in
+`docs/adr/0003-operator-decision-request-enforcement.md` (ADR-0003); this
+section is the operating surface that every agent reads at session start.
+
+### Authority gate (run first, before drafting the request body)
+
+Before composing a request, classify the decision against the gate. If it
+matches **any** of the 10 categories below, the operator MUST be asked
+(`authority_gate.requires_operator = true`):
+
+1. `destructive_or_irreversible` — DROP/truncate with data loss, force-push,
+   permanent deletion outside the repo; production data migrations, bulk
+   updates, backfills, reprocessing, and any durable state mutation with
+   corruption or duplication risk
+2. `security_privacy` — auth/authz, permission boundaries, CORS/CSP, crypto,
+   retention for user identifiers
+3. `secrets_credentials` — API key, env var, secret store, credential rotation
+4. `cost_billing` — paid resource scale, new vendor, quota raise
+5. `product_scope` — PRD/HLD intent, accepted requirements
+6. `legal_compliance` — license, ToS, HIPAA/GDPR, retention/deletion promise
+7. `architecture_dependencies` — ADR-worthy decisions, module boundary,
+   significant dependency/runtime
+8. `third_party_external_side_effects` — new external API, publish, real
+   notification/email/webhook
+9. `release_deploy_ops` — production availability, deploy timing, rollback,
+   required checks
+10. `repo_workflow_history` — branch protection, shared branch deletion, merge
+    strategy, force-push, auto-merge
+
+If the decision matches **none** of the 10 categories AND falls under
+must-not-ask, do not ask — act and report. Asking on must-not-ask items
+trains the operator to approve reflexively (approval fatigue = security bug).
+
+### Must-not-ask categories (proceed and report)
+
+- typo / formatting fixes within touched files
+- tests for behavior already requested or implemented
+- lint / typecheck fixes preserving behavior
+- small refactors required by local pattern and covered by tests
+- docs updates triggered by code changes under existing policy
+- read-only investigation and command output summarization
+- creating issues for unresolved findings when policy says to stop
+- reversible local cleanup
+- implementing a phase/slice that is explicitly enumerated in an accepted
+  ADR's `Implementation phases` (or equivalent) section, AND whose touched
+  paths fall inside the namespaces declared in that ADR's `scope.in[]`. This
+  exception is **subordinate to the authority gate**: if implementation
+  surfaces any decision matching one of the 10 ask-categories that the
+  ADR's accepted text did not explicitly pre-resolve (named in the Decision
+  section, an invariant, or a precondition), re-apply the gate and ask. The
+  ADR's acceptance pre-authorizes only what its body explicitly resolved —
+  not arbitrary downstream choices that happen to live under its scope
+
+### Request body schema
+
+| Field | Required | Notes |
+|---|---|---|
+| `title` | yes | one line |
+| `bluf` | yes | sender's own recommendation (1 line) + core reason (1 line). MUST NOT embed another sender's recommendation |
+| `decision_question` | yes | exactly one sentence ending in `?` or imperative ask |
+| `why_now` | yes | current blocker + delay impact, 2-3 sentences |
+| `options[]` | yes | cardinality rule: **length 1 hard-rejected** (approve/reject decisions MUST be modelled as two explicit options, e.g. `approve` and `reject_or_wait`); **length 2 or 3 is the default allowed range**; **length 4 or 5 is allowed only when the body includes `allow_extra_options_reason: <string, ≥ 20 chars, ≤ 240 chars, explains why merging or trimming would harm the decision>`**; **length 6+ hard-rejected unconditionally** (split into separate decision requests instead). Each entry: `{id, label, outcome, tradeoff_or_risk}` — all four sub-fields required per option |
+| `recommendation` | yes | option id, OR `no_recommendation_reason` |
+| `reversibility` | yes | enum `reversible \| partly_reversible \| irreversible` + `rollback_path` (for reversible/partly) or `irreversible_reason` |
+| `default_action` | yes | enum `proceed_safe \| wait \| do_read_only_only \| create_issue`. `proceed_safe` forbidden when `authority_gate.requires_operator = true` |
+| `evidence[]` | yes | array with at least one entry. Each entry: `{type: path\|pr\|issue\|adr\|command\|url\|inference, value, confidence?, limitation?}`. `inference` type REQUIRES both `confidence` and `limitation`. **When `authority_gate.requires_operator = true`, at least one entry MUST be a non-`inference` citation** (`path` / `pr` / `issue` / `adr` / `command` / `url`) — there is no free-text escape hatch for operator-required decisions. `path`-type evidence MUST resolve to a file that exists in the repo; line anchors (`:N` or `:N-M`) MUST point to valid line ranges |
+| `out_of_scope` | yes | decisions intentionally deferred + rabbit-hole traps the agent might fall into |
+| `authority_gate` | yes | `{category, self_decision_allowed, requires_operator, reason}` |
+
+### Word budget
+
+Counted on rendered markdown:
+
+- **warn** at ≥ 450 words
+- **reject** at ≥ 700 words unless body has `high_risk: true`
+- **hard reject** at ≥ 900 words unconditionally
+
+### Hard reject vs soft warning
+
+This table is the deterministic enforcement contract that PHASE-2/3
+validators MUST implement. It mirrors ADR-0003's Hard reject vs soft warning
+table; if the two ever diverge, ADR-0003 wins and this section is the bug.
+
+Hard reject (regex / schema, deterministic):
+
+- all required fields present (see schema table above)
+- exactly one `decision_question`
+- `options[]` cardinality: length 1 is hard-rejected (approve/reject MUST be
+  two explicit options); length 2 or 3 is the default range; length 4 or 5
+  is allowed only with `allow_extra_options_reason` (≥ 20 chars, ≤ 240
+  chars); length 6+ is hard-rejected unconditionally
+- each option has `id` + `label` + `outcome` + `tradeoff_or_risk` (all four
+  sub-fields non-empty)
+- `recommendation` references one of the option `id`s, OR
+  `no_recommendation_reason` is present (string, ≥ 20 chars)
+- `reversibility` is one of `reversible | partly_reversible | irreversible`;
+  if `reversible` or `partly_reversible`, `rollback_path` is non-empty; if
+  `irreversible`, `irreversible_reason` is non-empty
+- `default_action` is one of `proceed_safe | wait | do_read_only_only |
+  create_issue`; `proceed_safe` is rejected when
+  `authority_gate.requires_operator = true`
+- `evidence[]` has at least one entry; each entry has a `type` from
+  `{path, pr, issue, adr, command, url, inference}` and a non-empty `value`;
+  for `type: inference`, both `confidence` and `limitation` are required
+- when `authority_gate.requires_operator = true`, `evidence[]` has at least
+  one non-`inference` entry (no free-text escape hatch)
+- `path`-type evidence resolves to an existing file in the repo; if the
+  value includes a line anchor (`path:N` or `path:N-M`), N and M are within
+  the file's actual line range
+- word budget thresholds (warn ≥ 450, reject ≥ 700 unless `high_risk: true`,
+  hard reject ≥ 900)
+- `authority_gate` shape: `category` is one of the 10 ask-categories above,
+  `self_decision_allowed` and `requires_operator` are booleans, `reason` is
+  a non-empty string
+- **authority_gate consistency**: whenever `category` is one of the 10
+  ask-categories, `requires_operator` MUST be `true`, `self_decision_allowed`
+  MUST be `false`, and `default_action` MUST NOT be `proceed_safe`. Validator
+  implementations SHOULD derive `requires_operator` from `category` rather
+  than trusting agent-supplied input — the booleans exist for display and
+  audit, not as an escape hatch from the category enum
+
+Soft warning (LLM-judge, advisory only):
+
+- BLUF substantiveness (real recommendation vs "not sure")
+- option distinctness and viability
+- evidence relevance (path existence is hard; persuasive power is soft)
+- risk severity classification
+
+### Anti-patterns (do not ship)
+
+1. **Dual labelling** (α/β + A/B at once) — pick one label system per request
+2. **Embedding another sender's recommendation in BLUF** — use sender-own
+   recommendation; cite others as "X recommends Y; I independently agree/disagree
+   because Z"
+3. **Irrelevant identity fact** — model branding, agent ID, or other facts
+   unrelated to the reasoning
+4. **Inference stated as evidence** — anything inferred MUST use
+   `evidence: {type: inference, confidence, limitation}` rather than a bare
+   path/PR/URL citation
+5. **Mixing operator-facing body with dogfood/meta evaluation in one block** —
+   keep meta as a separate fold/link
+
+### Enforcement (5-defense stack)
+
+The intended primary defense is the dev-cycle helper structured path (see
+`.codex/skills/dev-cycle/SKILL.md` finish-cycle-json) — it becomes the
+active primary once ADR-0003 PHASE-2 lands; until then it is planned, not
+implemented. Until PHASE-2 ships, the canonical rule in this section (layer
+2) and the agent's self-review checkpoint (layer 5) carry the load.
+Layers 3-4 (agent-dialog kind, optional Claude Code Stop hook) are tracked
+in ADR-0003 as later phases.
+
+Glossary term ownership: `operator_decision_request`, `authority_gate`,
+`must_not_ask_category`, `defense_in_depth_stack` (all defined in ADR-0003).
 
 ## Companion policy files
 
