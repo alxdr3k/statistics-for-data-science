@@ -5,12 +5,12 @@ devdeck	/Users/yngn/ws/devdeck	main	boilerplate	none
 my-skill	/Users/yngn/ws/my-skill	main	universal	none
 second-brain	/Users/yngn/ws/second-brain	main	universal	none
 statistics-for-data-science	/Users/yngn/ws/statistics-for-data-science	main	universal	none
-xeflabs	/Users/yngn/ws/xeflabs	dev	universal	none
-github-discord-bot	/Users/yngn/ws/xeflabs/github-discord-bot	dev	universal	none
-github-runner	/Users/yngn/ws/xeflabs/github-runner	dev	universal	none
-ops	/Users/yngn/ws/xeflabs/ops	dev	universal	none
+xeflabs	/Users/yngn/ws/xeflabs	main	universal	none
+github-discord-bot	/Users/yngn/ws/xeflabs/github-discord-bot	main	universal	none
+github-runner	/Users/yngn/ws/xeflabs/github-runner	main	universal	none
+ops	/Users/yngn/ws/xeflabs/ops	main	universal	none
 xef-scale	/Users/yngn/ws/xeflabs/xef-scale	main	boilerplate	none
-ye-chef	/Users/yngn/ws/xeflabs/ye-chef	dev	universal	none
+ye-chef	/Users/yngn/ws/xeflabs/ye-chef	main	universal	none
 k-world-monitor	/Users/yngn/ws/k-world-monitor	main	boilerplate	none
 ritual	/Users/yngn/ws/ritual	main	boilerplate	none
 saju-diary	/Users/yngn/ws/saju-diary	main	boilerplate	none

@@ -16,11 +16,6 @@ git_ref_exists() {
 review_range_ref() {
   local type="$1" base="$2"
 
-  if [[ "$type" == "direct-push" ]] && git_ref_exists "refs/remotes/origin/main"; then
-    echo "origin/main"
-    return
-  fi
-
   if git_ref_exists "$base"; then
     echo "$base"
   elif git_ref_exists "refs/remotes/origin/$base"; then

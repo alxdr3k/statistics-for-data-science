@@ -1,3 +1,8 @@
+---
+name: boilerplate
+description: "Sync boilerplate policy files into project repositories. Use when asked to deploy, roll out, propagate, or check boilerplate policy updates across repos."
+---
+
 Manage boilerplate policy sync across repositories.
 
 If `--help` is passed or the argument is unrecognized, show this usage guide.

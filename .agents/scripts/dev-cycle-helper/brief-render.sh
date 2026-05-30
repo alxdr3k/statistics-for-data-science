@@ -262,6 +262,10 @@ finish_cycle_json_file() {
       }
   fi
   rm -f "$record_file"
+  # PA-1.3: mirror brief log to central state so cycle results survive
+  # `git worktree remove`. Best-effort: failure does not break the
+  # cycle close.
+  mirror_brief_to_central "$state_dir" >/dev/null 2>&1 || true
 }
 
 finish_cycle_json() {

@@ -1,7 +1,0 @@
-actwyn
-concluv
-boilerplate
-devdeck
-my-skill
-statistics-for-data-science
-second-brain

@@ -5,11 +5,11 @@ usage() {
 usage: dev-cycle-helper.sh <command>
 
 commands:
-  direct-push-list
   repo-name
   repo-type
   default-branch
   review-base
+  mutation-entry-check
   change-scope
   review-dossier
   sync
@@ -22,6 +22,7 @@ commands:
   check-test-plan
   summary
   summary-json
+  mirror-brief
 EOF
 }
 
@@ -29,11 +30,11 @@ dev_cycle_helper_main() {
   local cmd
   cmd="${1:-}"
   case "$cmd" in
-    direct-push-list) direct_push_repos ;;
     repo-name) repo_name ;;
     repo-type) repo_type ;;
     default-branch) default_branch ;;
     review-base) review_base ;;
+    mutation-entry-check) mutation_entry_check ;;
     change-scope) change_scope ;;
     review-dossier) review_dossier ;;
     sync) sync_repo ;;
@@ -46,6 +47,7 @@ dev_cycle_helper_main() {
     check-test-plan) check_test_plan ;;
     summary) summary ;;
     summary-json) summary_json ;;
+    mirror-brief) mirror_brief_to_central ;;
     help|-h|--help|"") usage ;;
     *) echo "unknown command: $cmd" >&2; usage >&2; return 2 ;;
   esac

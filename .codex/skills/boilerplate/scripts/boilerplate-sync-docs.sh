@@ -6,8 +6,9 @@ MY_SKILL="${MY_SKILL:-$ROOT/my-skill}"
 BOILERPLATE="${BOILERPLATE:-$ROOT/boilerplate}"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_TARGETS="$SKILL_DIR/targets.tsv"
-BRANCH="chore/boilerplate-doc-sync"
+BRANCH_PREFIX="${BRANCH_PREFIX:-chore/boilerplate-doc-sync}"
 COMMIT_MSG="${COMMIT_MSG:-docs: sync boilerplate policy files}"
+PR_TITLE="${PR_TITLE:-docs: sync boilerplate policy files}"
 
 # Coverage — what this script automatically syncs (overwrite, no surgical patching):
 #
@@ -20,7 +21,6 @@ COMMIT_MSG="${COMMIT_MSG:-docs: sync boilerplate policy files}"
 #     docs/DOCUMENTATION.policy.md
 #
 # Out of scope (intentionally never mutated by sync):
-#   AGENTS.md     — project-owned; add AGENTS.policy.md ref via /boilerplate-migrate
 #   TESTING.md, CI/CD docs, ADRs, source code
 
 usage() {
@@ -60,21 +60,9 @@ default_branch() {
   echo "${branch:-main}"
 }
 
-is_direct_repo() {
-  local name="$1"
-  [[ -f "$MY_SKILL/direct-push-repos.txt" ]] && grep -qxF "$name" "$MY_SKILL/direct-push-repos.txt"
-}
-
 base_branch() {
   local repo="$1" name="$2"
-  if is_direct_repo "$name"; then
-    echo "main"
-  elif git -C "$repo" show-ref --verify --quiet refs/remotes/origin/dev ||
-       git -C "$repo" show-ref --verify --quiet refs/heads/dev; then
-    echo "dev"
-  else
-    default_branch "$repo"
-  fi
+  echo "main"
 }
 
 profile_for() {
@@ -207,6 +195,7 @@ apply_one() {
   local name="$1" repo="$2" base="$3" profile="$4"
   [[ -d "$repo/.git" || -f "$repo/.git" ]] || { echo "$name missing-repo"; return 0; }
   [[ "$profile" == "custom" ]] && { echo "$name skip-custom"; return 0; }
+  base="main"
 
   local wt
   wt="$(mktemp -d "/tmp/boilerplate-sync-${name}.XXXXXX")"
@@ -214,7 +203,9 @@ apply_one() {
 
   git -C "$repo" fetch origin "$base" -q
   git -C "$repo" worktree add --detach "$wt" "origin/$base" -q
-  git -C "$wt" checkout -b "$BRANCH" -q
+  local branch
+  branch="${BRANCH_PREFIX}-${name}-$(date +%Y%m%d%H%M%S)"
+  git -C "$wt" checkout -b "$branch" -q
 
   # Copy policy files
   while IFS= read -r f; do
@@ -228,7 +219,11 @@ apply_one() {
   if [[ -f "$wt/CLAUDE.md" ]]; then
     ensure_claude_imports "$wt/CLAUDE.md"
   fi
-  # AGENTS.md is project-owned — mutations are handled by /boilerplate-migrate, not sync
+  # AGENTS.md is project-owned; sync only ensures the boilerplate-owned policy
+  # file is reachable from the repo-level entrypoint.
+  if [[ -f "$wt/AGENTS.md" ]]; then
+    ensure_agents_ref "$wt/AGENTS.md"
+  fi
 
   git -C "$wt" diff --check
   git -C "$wt" add -A
@@ -236,12 +231,23 @@ apply_one() {
     echo "$name unchanged"
   else
     git -C "$wt" commit -m "$COMMIT_MSG" -q
-    git -C "$wt" push origin HEAD:"$base" -q
-    echo "$name pushed $(git -C "$wt" rev-parse --short HEAD) -> $base"
+    git -C "$wt" push -u origin "$branch" -q
+    local pr_body pr_url
+    pr_body="$(mktemp)"
+    cat > "$pr_body" <<EOF
+Sync boilerplate-owned policy files.
+
+## Test plan
+- git diff --check
+EOF
+    pr_url="$(cd "$wt" && gh pr create --base "$base" --head "$branch" --title "$PR_TITLE" --body-file "$pr_body")"
+    rm -f "$pr_body"
+    (cd "$wt" && gh pr merge "$pr_url" --squash --delete-branch)
+    echo "$name squash-merged $(git -C "$wt" rev-parse --short HEAD) -> $base ($pr_url)"
   fi
 
   git -C "$repo" worktree remove "$wt" --force >/dev/null
-  git -C "$repo" branch -D "$BRANCH" >/dev/null 2>&1 || true
+  git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
 }
 
 # ── sync ─────────────────────────────────────────────────────────────────────
@@ -314,7 +320,7 @@ case "$cmd" in
     t_profile="$2"
     [[ "$t_profile" =~ ^(universal|boilerplate|custom)$ ]] || die "profile must be universal|boilerplate|custom"
     t_name="$(basename "$t_repo")"
-    t_base="$(git -C "$t_repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || git -C "$t_repo" symbolic-ref --short HEAD 2>/dev/null || echo main)"
+    t_base="main"
     t_line="${t_name}	${t_repo}	${t_base}	${t_profile}	none"
     if grep -q "^${t_name}	" "$DEFAULT_TARGETS" 2>/dev/null; then
       # Preserve existing invariant_tracking value if present

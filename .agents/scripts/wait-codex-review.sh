@@ -75,6 +75,11 @@ esac
 repo=""
 pr=""
 baseline=""
+# reviewed_head_sha — PR head SHA captured alongside the baseline.
+# review-loop's pass payload binds the pass signal to this SHA so that
+# a push between baseline and pass cannot blow up into an unreviewed
+# land. Empty until baseline is first resolved.
+reviewed_head_sha=""
 observation_feedback_items="[]"
 pass_reaction_observed=false
 pass_comment_observed=false
@@ -135,6 +140,7 @@ emit_json_observation() {
     --arg repo "$repo" \
     --arg pr "$pr" \
     --arg baseline "$baseline" \
+    --arg reviewed_head_sha "$reviewed_head_sha" \
     --arg pass_actor "${pass_actor:-chatgpt-codex-connector[bot]}" \
     --arg pass_reaction "${pass_reaction:-+1}" \
     --arg pass_comment_pattern "$pass_comment_pattern" \
@@ -153,7 +159,11 @@ emit_json_observation() {
     --argjson eyes_present "$eyes_present" \
     --argjson api "$api_json" '
     def next_actions($result):
-      if $result == "passed" then ["check_required_status", "merge_pr"]
+      # PA-2.1: merge_pr removed from the passed action list. Merging is
+      # the land-pr helper (PA-2.2) territory, not the wait observer. A
+      # worker-context call that follows this list verbatim must not
+      # mutate origin/main.
+      if $result == "passed" then ["check_required_status"]
       elif $result == "feedback" then ["apply_feedback", "commit", "push", "rerun_wait"]
       elif $result == "timeout" then ["report_timeout", "stop_loop"]
       elif $result == "review_request_unacknowledged" then ["report_unacknowledged_review_request", "stop_loop"]
@@ -168,6 +178,7 @@ emit_json_observation() {
       repo:$repo,
       pr_number:(try ($pr | tonumber) catch null),
       baseline:(if $baseline == "" then null else $baseline end),
+      reviewed_head_sha:(if $reviewed_head_sha == "" then null else $reviewed_head_sha end),
       pass_reaction:{actor:$pass_actor, content:$pass_reaction, observed:$pass_reaction_observed},
       pass_comment:{actor:$pass_actor, pattern:$pass_comment_pattern, observed:$pass_comment_observed},
       feedback_items:$feedback_items,
@@ -308,7 +319,14 @@ fetch_reactions_or_empty() {
 
 FETCH_BASELINE_PERMANENT_RC=99
 fetch_baseline() {
-  local raw push_ts head_sha head_repo branch pr_info pr_err
+  # Emits `<baseline_ts>\t<head_sha>` on stdout so the caller captures both
+  # values atomically from the same `gh api pulls` response. Splitting these
+  # into two calls would race: a push between the two API calls would let
+  # an old baseline pair with the new head SHA, blessing an unreviewed commit
+  # as "reviewed at <new_head>" while pass evaluation still uses the older
+  # baseline. The tab separator is safe because ISO timestamps and SHAs
+  # contain no whitespace.
+  local raw push_ts head_sha head_repo branch pr_info
   # PR lookup: distinguish permanent from transient failures.
   # NOTE: cannot use `exit 4` here — caller invokes us via command substitution
   # (which runs in a subshell), so exit only terminates the subshell. Return a
@@ -325,32 +343,56 @@ fetch_baseline() {
   head_repo=$(printf '%s' "$pr_info" | jq -r '.head.repo.full_name // empty' 2>/dev/null || true)
   head_sha=$(printf '%s' "$pr_info" | jq -r '.head.sha // empty' 2>/dev/null || true)
 
-  # 1) Events API PushEvent
-  if [ -n "$branch" ] && [ -n "$head_repo" ]; then
+  # Each baseline source below must be SHA-matched against $head_sha
+  # before emit. Cross-API stale pair would otherwise pair an old
+  # PushEvent timestamp with the new pulls head SHA, blessing an old
+  # pass as "reviewed at <new_head>".
+  #
+  # 1) Events API PushEvent — accept only the PushEvent whose payload.head
+  #    matches the pulls head_sha. PushEvent.payload.head is the latest
+  #    commit SHA for that push; if it equals the live pulls head, the
+  #    pair came from the same logical state.
+  if [ -n "$branch" ] && [ -n "$head_repo" ] && [ -n "$head_sha" ]; then
     if raw=$(gh api --paginate "repos/$head_repo/events" 2>/dev/null); then
-      push_ts=$(printf '%s' "$raw" | jq -r -s --arg ref "refs/heads/$branch" '
+      push_ts=$(printf '%s' "$raw" | jq -r -s \
+        --arg ref "refs/heads/$branch" \
+        --arg head "$head_sha" '
         add // []
-        | [.[] | select(.type == "PushEvent") | select(.payload.ref == $ref) | .created_at]
+        | [.[] | select(.type == "PushEvent")
+               | select(.payload.ref == $ref)
+               | select((.payload.head // "") == $head)
+               | .created_at]
         | max // empty')
-      if [ -n "$push_ts" ]; then echo "$push_ts"; return 0; fi
+      if [ -n "$push_ts" ]; then printf '%s\t%s\n' "$push_ts" "$head_sha"; return 0; fi
     fi
   fi
-  # 2) Timeline events
-  if raw=$(gh api --paginate "repos/$repo/issues/$pr/timeline" 2>/dev/null); then
-    push_ts=$(printf '%s' "$raw" | jq -r -s '
-      add // []
-      | [.[] |
-          if .event == "committed" then (.committer.date // .author.date // empty)
-          elif .event == "head_ref_force_pushed" then .created_at
-          else empty end ]
-      | max // empty')
-    if [ -n "$push_ts" ]; then echo "$push_ts"; return 0; fi
+  # 2) Timeline events — accept only committed/head_ref_force_pushed
+  #    events whose recorded SHA matches the pulls head_sha. committed
+  #    uses `.sha`; head_ref_force_pushed uses `.commit_id` (GitHub API).
+  if [ -n "$head_sha" ]; then
+    if raw=$(gh api --paginate "repos/$repo/issues/$pr/timeline" 2>/dev/null); then
+      push_ts=$(printf '%s' "$raw" | jq -r -s --arg head "$head_sha" '
+        add // []
+        | [.[] |
+            if .event == "committed" and ((.sha // "") == $head)
+              then (.committer.date // .author.date // empty)
+            elif .event == "head_ref_force_pushed" and ((.commit_id // "") == $head)
+              then .created_at
+            else empty end ]
+        | max // empty')
+      if [ -n "$push_ts" ]; then printf '%s\t%s\n' "$push_ts" "$head_sha"; return 0; fi
+    fi
   fi
   # 3) HEAD commit committer.date — query head repo when known (fork PRs),
-  #    falling back to base only when head repo is unavailable.
+  #    falling back to base only when head repo is unavailable. This path
+  #    is already SHA-pinned because we fetch the commit by $head_sha
+  #    directly.
   [ -z "$head_sha" ] && return 1
   local commit_repo="${head_repo:-$repo}"
-  gh api "repos/$commit_repo/commits/$head_sha" -q .commit.committer.date 2>/dev/null
+  local commit_ts
+  commit_ts=$(gh api "repos/$commit_repo/commits/$head_sha" -q .commit.committer.date 2>/dev/null)
+  if [ -n "$commit_ts" ]; then printf '%s\t%s\n' "$commit_ts" "$head_sha"; return 0; fi
+  return 1
 }
 
 clamp_to_now() {
@@ -391,6 +433,17 @@ while :; do
 
   if [ -n "${CODEX_BASELINE:-}" ]; then
     baseline="$CODEX_BASELINE"
+    # When the caller fixes baseline via env, we still need a head SHA for
+    # the observation. Fetch separately — drift is acceptable here because
+    # the operator declared the baseline explicitly and is responsible for
+    # the pair semantics.
+    if pr_info_for_sha=$(gh api "repos/$repo/pulls/$pr" 2>/dev/null); then
+      new_head=$(printf '%s' "$pr_info_for_sha" \
+        | jq -r '.head.sha // empty' 2>/dev/null || true)
+      if [ -n "$new_head" ]; then
+        reviewed_head_sha="$new_head"
+      fi
+    fi
   else
     set +e
     fetched=$(fetch_baseline)
@@ -403,9 +456,13 @@ while :; do
       echo "WARN: could not fetch baseline; retrying next poll" >&2
       sleep "$interval"; continue
     fi
-    if [ "$fetched" != "$last_fetched_baseline" ]; then
-      last_fetched_baseline="$fetched"
-      new_clamped=$(clamp_to_now "$fetched")
+    # fetched is `<baseline_ts>\t<head_sha>` — split atomically here so
+    # baseline and head_sha came from the same API observation.
+    fetched_baseline="${fetched%%$'\t'*}"
+    fetched_head_sha="${fetched##*$'\t'}"
+    if [ "$fetched_baseline" != "$last_fetched_baseline" ]; then
+      last_fetched_baseline="$fetched_baseline"
+      new_clamped=$(clamp_to_now "$fetched_baseline")
       # Monotonic: never let baseline regress (e.g., if baseline source
       # changes from Events API to commit timestamp, keep the older later).
       if [ -n "$last_clamped_baseline" ] && [[ "$new_clamped" < "$last_clamped_baseline" ]]; then
@@ -414,6 +471,11 @@ while :; do
       last_clamped_baseline="$new_clamped"
     fi
     baseline="$last_clamped_baseline"
+    # Update reviewed_head_sha from the same fetch — atomic with baseline.
+    # Fall back: keep previous value if this fetch yielded an empty SHA.
+    if [ -n "$fetched_head_sha" ]; then
+      reviewed_head_sha="$fetched_head_sha"
+    fi
   fi
 
   # 1) Fetch reactions. fetch_reactions_or_empty absorbs permanent failures

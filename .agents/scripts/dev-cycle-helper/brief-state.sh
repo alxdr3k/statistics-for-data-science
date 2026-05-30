@@ -6,7 +6,11 @@ init_brief() {
   run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   started_at="$(iso_now)"
   start_epoch="$(date -u +%s)"
-  state_dir="$(ensure_state_dir)"
+  # init_brief starts (or restarts) a cycle, so it must seed state from
+  # the current workspace — ignoring any DEV_CYCLE_STATE_DIR carried over
+  # from a previous cycle. Subsequent helper calls in the same shell
+  # session reuse the value init_brief exports below via ensure_state_dir.
+  state_dir="$(fresh_state_dir)"
   log="$state_dir/dev-cycle-briefs.md"
   jsonl="$(brief_jsonl_file "$state_dir")"
   audit_jsonl="$(brief_audit_jsonl_file "$state_dir")"
@@ -28,6 +32,7 @@ init_brief() {
     > "$run_json" || return 1
   printf '%s\n' "$run_id" > "$run_id_file" || return 1
   printf '%s\n' "$start_epoch" > "$start_epoch_file" || return 1
+  shell_export DEV_CYCLE_STATE_DIR "$state_dir"
   shell_export DEV_CYCLE_RUN_ID "$run_id"
   shell_export DEV_CYCLE_BRIEF_LOG "$log"
   shell_export DEV_CYCLE_BRIEF_JSONL "$jsonl"

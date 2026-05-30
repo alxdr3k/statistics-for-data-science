@@ -11,6 +11,7 @@ Renders .codex/skills/<skill-name>/SKILL.md to stdout.
 Repo-local additions belong in .codex/skill-overrides/<skill-name>.md.
 Write stdout to a temp file, then move it into place; redirecting directly to
 the target path creates/truncates the file before safety checks run.
+The base skill must include Codex YAML frontmatter with name and description.
 
 Set MY_SKILL_MIGRATE_CODEX_SKILLS=1 only during a one-time migration. With that
 set, a legacy unmarked target may be replaced by generated output. Move any
@@ -108,12 +109,37 @@ generated_output_hash() {
   ' "$input"
 }
 
-emit_with_header() {
-  local body="$1" header="$2" close_line
-  close_line="$(awk '
+frontmatter_close_line() {
+  local input="$1"
+  awk '
     NR == 1 && $0 == "---" { in_frontmatter = 1; next }
     in_frontmatter && $0 == "---" { print NR; exit }
-  ' "$body")"
+  ' "$input"
+}
+
+validate_skill_frontmatter() {
+  local input="$1" label="$2" close_line
+  close_line="$(frontmatter_close_line "$input")"
+
+  if [[ -z "$close_line" || "$close_line" -le 2 ]]; then
+    echo "Codex skill requires YAML frontmatter delimited by ---: $label" >&2
+    exit 3
+  fi
+
+  if ! sed -n "2,$((close_line - 1))p" "$input" | grep -Eq '^[[:space:]]*name:[[:space:]]*[^[:space:]]'; then
+    echo "Codex skill frontmatter missing name: $label" >&2
+    exit 3
+  fi
+
+  if ! sed -n "2,$((close_line - 1))p" "$input" | grep -Eq '^[[:space:]]*description:[[:space:]]*[^[:space:]]'; then
+    echo "Codex skill frontmatter missing description: $label" >&2
+    exit 3
+  fi
+}
+
+emit_with_header() {
+  local body="$1" header="$2" close_line
+  close_line="$(frontmatter_close_line "$body")"
 
   if [[ -n "$close_line" ]]; then
     sed -n "1,${close_line}p" "$body"
@@ -148,6 +174,8 @@ else
     overlay_sha="$(sha_file "$overlay")"
   fi
 fi
+
+validate_skill_frontmatter "$tmp_body" "$base"
 
 output_sha="$(sha_file "$tmp_body")"
 

@@ -76,7 +76,12 @@ function html_comment_singleline(line) {
 '
 
   local header_output
-  header_output="$(printf '%s\n' "$body" | awk "$awk_lib"'
+  # awk가 header를 찾으면 즉시 exit하므로 printf의 stdout이 SIGPIPE를 받는다.
+  # set -o pipefail이 켜진 상태에서 이 SIGPIPE는 caller에 exit 141로 전파되어
+  # set -e가 잡는다 (큰 PR body에서 재현). subshell 안에서만 pipefail을 꺼서
+  # awk early-exit 최적화를 유지하면서 정상 케이스를 silent에서 SIGPIPE 누락
+  # 으로 끌어내리지 않는다.
+  header_output="$(set +o pipefail; printf '%s\n' "$body" | awk "$awk_lib"'
     BEGIN { in_fence = 0; fence_marker = ""; in_html = 0 }
     {
       line = $0
@@ -106,7 +111,11 @@ function html_comment_singleline(line) {
   read -r header_line tp_level <<< "$header_output"
 
   local section
-  section="$(printf '%s\n' "$body" | awk -v start="$header_line" -v tp_level="$tp_level" "$awk_lib"'
+  # 동일 SIGPIPE 패턴: 본 awk도 next same-or-higher heading에서 early `exit`
+  # 하므로 그 뒤에 ## Risks 같은 후속 섹션이 있는 흔한 PR body에서 printf가
+  # SIGPIPE를 받는다. header_output 추출과 같은 이유로 subshell 안에서만
+  # pipefail을 끈다.
+  section="$(set +o pipefail; printf '%s\n' "$body" | awk -v start="$header_line" -v tp_level="$tp_level" "$awk_lib"'
     BEGIN { in_fence = 0; fence_marker = ""; in_html = 0 }
     NR <= start { next }
     {

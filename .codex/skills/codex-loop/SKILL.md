@@ -1,135 +1,128 @@
 ---
 name: codex-loop
-description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push, 통과 신호(reaction 또는 pass-comment 매칭)를 받으면 정책에 맞춰 merge
+description: 현재 PR에 대해 codex 리뷰 wait + feedback fix + land까지 한 번에 처리하는 shim. 내부적으로 review-loop과 land-pr.sh를 위임 호출한다.
 ---
 <!-- my-skill:generated
 skill: codex-loop
-base-sha256: cff31cfefbd329f47d9f1ef38e6fb361224f9202322a45f61e7d32553bf8b744
+base-sha256: 9b1ae7cc9dac4f1653c6654127d7f7c1a98fec26b9b07307568f868675a18f96
 overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-output-sha256: cff31cfefbd329f47d9f1ef38e6fb361224f9202322a45f61e7d32553bf8b744
+output-sha256: 9b1ae7cc9dac4f1653c6654127d7f7c1a98fec26b9b07307568f868675a18f96
 do-not-edit: edit .codex/skill-overrides/codex-loop.md instead
 -->
 
-현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 신호(`$CODEX_PASS_ACTOR`의 `$CODEX_PASS_REACTION` reaction 또는 baseline 이후 `$CODEX_PASS_ACTOR`가 남긴 issue comment/review body가 `$CODEX_PASS_COMMENT_PATTERN`(기본 regex `didn['’]?t find any major issues`, case-insensitive)에 매칭, 단 review의 state가 `CHANGES_REQUESTED`/`DISMISSED`이면 매칭 무관 actionable feedback으로 유지)까지 반복한 뒤 PR을 정책에 맞춰 merge한다.
+현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, feedback 코멘트를 수정·push하고, 통과 신호를 받으면 정책에 맞게 PR을 land한다. codex-loop은 자체 review/land logic을 보유하지 않으며, 다음 두 building block을 위임 호출하는 **thin shim**이다:
+
+1. `/review-loop` — codex review wait + feedback handling + pass 신호 인계 (worker도 호출 가능; merge 단계 없음).
+2. `scripts/land-pr.sh --expected-head-sha <SHA>` — review-loop의 pass payload `review_loop_pass_signal.head_sha`를 그대로 받아 land. PR live head가 reviewed SHA와 다르면 `expected_head_mismatch` envelope으로 거부 (codex가 보지 않은 commit이 추가됐다는 신호).
+
+이 SHA pin은 review wait와 land 사이의 push race를 닫는다. raw `gh pr merge`를 직접 호출하지 않는다.
 
 사용자에게 보이는 보고, feedback 정리, 질문은 한국어로 작성한다. 코드, 명령, 파일명, 원문 인용은 원문 언어를 유지한다.
 
-## 핵심 원칙: 대기 사이클마다 foreground script 1회
+## Flags
 
-각 대기 사이클은 `wait-codex-review.sh`를 foreground로 1회 실행해 처리한다.
-스크립트가 내부 polling을 담당하고 종료 시점에 필요한 결과만 반환한다. GitHub app으로
-즉시 확인 가능한 상태가 있어도 대기/polling은 스크립트에 맡긴다. feedback을 수정하고
-push한 뒤에는 다음 대기 사이클로 보고 스크립트를 다시 실행한다.
+- `--opus-review`: `/review-loop --opus-review`로 그대로 전달.
 
-```bash
-CODEX_REVIEW_HELPER=".agents/scripts/wait-codex-review.sh"
-[ -x "$CODEX_REVIEW_HELPER" ] || CODEX_REVIEW_HELPER="$HOME/.agents/scripts/wait-codex-review.sh"
-[ -x "$CODEX_REVIEW_HELPER" ] || { echo "Missing wait-codex-review.sh"; exit 1; }
-bash "$CODEX_REVIEW_HELPER"
-```
+## 책임 경계
 
-기본 stdout은 기존처럼 사람이 읽는 feedback 출력이다. 구조화된 관찰이 필요하면 동일한
-foreground 호출에 `--json`을 붙이거나 `CODEX_REVIEW_OUTPUT=json`을 설정한다. 이 모드는
-exit code를 바꾸지 않고 stdout에 compact `schema_version:1`,
-`kind:"codex_review_observation"` JSON 1개를 출력한다.
-
-다음 패턴은 금지한다.
-
-- `bash ... &` 로 background polling
-- background 실행 후 주기적 output 확인
-- 매 sleep 사이에 PR 상태를 다시 polling
-- 별도 monitor 도구로 stream watch
+- codex-loop은 orchestrator-only다. worker context에서 호출하면 land 단계가 `LAND_FORBIDDEN=1`에 의해 거부된다 (PA-1.x worker guard + PA-2.2 land 거부의 3차 enforcement). worker는 `/review-loop`을 직접 호출해 pass 신호만 인계하고 후속 land는 orchestrator가 결정한다.
+- codex-loop이 직접 실행하는 mutation은 (1) `scripts/land-pr.sh` 호출 (orchestrator land path), (2) `mcp__github__unsubscribe_pr_activity` (review-loop의 Path A subscription 정리)뿐이다. 모든 review wait/feedback/push는 review-loop이 담당한다.
 
 ## 절차
 
-1. PR 만든 직후, 또는 push 직후, 스크립트를 foreground로 1회 실행한다.
-2. 종료될 때까지 기다린다. 스크립트가 PR 감지, baseline 계산, feedback/reaction
-   polling을 처리한다.
-3. 종료 코드에 따라 처리한다.
+### 1. review-loop 위임
 
-| exit | 의미 | 다음 행동 |
-| ---- | ---- | --------- |
-| 0 | Codex pass 신호(reaction 또는 pass-comment 매칭) 감지 | checks 확인 후 PR merge |
-| 1 | 새 comment/review가 stdout에 출력됨 | 분석 -> 수정 -> commit -> push -> 스크립트 재실행 |
-| 2 | 두 번째 timeout 또는 review 요청 미확인 | loop 종료, 사용자에게 타임아웃 보고 |
-| 3 | PR 감지 실패 | PR 번호 또는 URL 요청 후 스크립트 인자로 재실행 |
-| 4 | 진행을 막는 API 오류 | 인증/권한/네트워크 문제 보고 |
+`/review-loop` 또는 동등한 호출 (Claude Code: `/review-loop`, Codex CLI: `$review-loop`, plain-language skill request)을 실행한다. flag와 env var는 그대로 review-loop으로 전달된다.
 
-첫 successful 조회에서 PR의 comment/review/reaction이 모두 비어 있으면 helper는 한 번만
-`CODEX_INITIAL_EMPTY_DELAY`초, 기본 300초를 쉰 뒤 기존 `CODEX_POLL_INTERVAL`로
-계속 조회한다. PR 생성 직후 Codex/GitHub 쪽 초기 처리 지연 때문에 빈 PR을 너무 촘촘하게
-polling하지 않기 위한 동작이다.
+review-loop은 codex가 PR을 review하고 pass 신호를 emit할 때까지 (또는 terminal stop에 도달할 때까지) 동작한다. 종료 시 다음 둘 중 하나를 emit한다:
 
-각 polling iter에서 helper는 PR 본문 reaction, 인증 사용자 comment의 reaction,
-그리고 codex bot이 남긴 issue comment/review body의 pass-comment 매칭을 확인한다.
-reaction 또는 pass-comment 매칭 중 하나라도 baseline 이후 발견되면 exit 0으로
-종료한다.
+- **Pass payload** (`kind:"review_loop_pass_signal"`): `{schema_version, kind, repo, pr_number, head_sha, baseline, signal_source, path}`. `head_sha`가 codex가 실제로 review한 commit. → 2단계로 진행.
+- **Terminal payload** (`kind:"review_loop_terminal_signal"`): `{result, exit_code, repo, pr_number, current_head_sha, baseline, path, retryable, failure_reason}`. timeout/PR 미감지/auth 실패/eyes ack 실패 등. → 3단계 terminal 처리.
 
-- 첫 polling iter에서 review 요청을 아직 남기지 않았으면 PR에 `$CODEX_REVIEW_REQUEST_BODY`
-  (기본 본문은 codex에게 pass-comment 형태로 답해달라는 명시적 부탁을 포함)
-  코멘트를 1회 무조건 남긴다. codex의 reaction 상태와 무관.
-- 게시 후 PR 본문 또는 내 comment에 `eyes` reaction이 생기면 acknowledge로
-  인식하고 계속 대기한다.
-- review 요청 comment 자체는 새 feedback으로 처리하지 않는다.
-- 게시 후 다음 3번의 polling iter 안에 PR 본문 또는 내 comment에 `eyes`
-  reaction이 생기지 않으면 exit 2로 종료한다.
-- 일반 polling timeout은 한 번 더 대기하고, 두 번째 timeout에서 exit 2로 종료한다.
+### 2. Pass 신호 → SHA-pinned land
 
-인자 형식:
+review-loop에서 pass payload를 받으면 다음 셋을 순서대로 확인하고 land를 실행한다.
 
-- 인자 없음: 현재 브랜치 PR 자동 감지
-- PR 번호: `bash "$CODEX_REVIEW_HELPER" 42`
-- PR URL: `bash "$CODEX_REVIEW_HELPER" https://github.com/owner/repo/pull/42`
-- structured observation: `bash "$CODEX_REVIEW_HELPER" --json 42`
+1. PR이 draft가 아닌가? (`gh pr view <PR_NUMBER> --json isDraft -q .isDraft`)
+2. required checks가 모두 SUCCESS인가? 미완료/실패 항목이 있으면 `gh pr checks <PR_NUMBER> --watch`로 완료를 기다린다.
+3. baseline 이후 새 actionable comment/review가 없는가? (review-loop의 pass 신호 시점에는 0이어야 정상; 만약 그 사이 새로 도착했으면 review-loop을 한 번 더 재실행)
 
-## Structured Observation
+확인이 모두 통과하면 `scripts/land-pr.sh`를 호출한다. caller cwd는 PR head branch를 잡고 있는 worktree일 수 있으므로 (dev-cycle Step 9의 일반 흐름), land-pr 호출은 두 단계로 나뉜다 — review cwd에서 식별자를 캡처한 다음 git context가 없는 safe cwd로 이동해서 호출.
 
-`--json` 출력은 DevDeck 같은 projection layer가 나중에 읽을 수 있는 작은 상태 스냅샷이다.
-한 줄 compact JSON이므로 필요하면 호출자가 그대로 JSONL log에 append할 수 있다.
-필드는 versioned envelope, repo/PR/baseline, pass reaction 관찰 상태, feedback items,
-timeout 상태, review request/eyes acknowledgement 상태, API error classification,
-`next_allowed_actions`를 포함한다. 이 JSON은 machine state이고, Markdown/stdout human
-feedback을 대체하지 않는다. codex-loop 자체는 기존 exit code 기반 분기를 유지한다.
+#### Why cwd split
 
-## Feedback 처리
+caller cwd가 PR head worktree와 같으면 land-pr의 `cwd_is_head_worktree` 가드 (PR #60)가 `rc=6`으로 거부한다. 이 가드는 `gh pr merge --delete-branch`가 그 worktree의 HEAD를 main으로 강제 이동시키다가 canonical main이 다른 worktree에 잡혀 있으면 `fatal: '<base>' is already used by worktree`로 깨지는 패턴을 방어한다. codex-loop은 그 가드를 우회하지 않고 cwd를 safe non-head 위치로 옮긴 다음 호출한다. 모든 gh 호출은 `LAND_PR_REPO` env로 repo를 명시하므로 cwd가 비-git이어도 정상 동작한다.
 
-- codex review 결과를 그대로 작업 목록으로 받아들이지 말고 적대적/비판적으로 재평가한다. 각 comment/review item마다 주장, 근거, 재현 가능성, 실제 영향, severity, 범위 적합성을 먼저 판정한다.
-- `.agents/scripts/dev-cycle-helper.sh` 또는 `$HOME/.agents/scripts/dev-cycle-helper.sh`가 있으면 `review-dossier`로 diff size, 파일 확산, 계약/중요 경로를 reviewer 입력 정보로 확인한다. high-capability/high-effort reviewer 사용 여부는 feedback의 semantic risk를 보고 본인이 판단한다.
-- reviewer를 사용할 경우 raw PR 전체를 넘기지 말고 새 feedback, 관련 diff, helper-generated review dossier 또는 수동 risk summary, 재현/검증 출력, 이전 finding 요약만 전달한다.
-- 유효한 item은 가장 합리적인 해결 방식을 선택한다: root-cause code fix, test 보강, 문서/계약 정정, 요구사항 clarification, 또는 사용자 결정 요청. 리뷰를 만족시키려고 보안/검증/계약을 약화하거나 symptom-only patch를 만들지 않는다.
-- 코멘트가 모호하거나 우선순위 판단이 필요하면 코드 수정 전 사용자에게 확인한다.
-- 이미 처리된 이슈, 재현 불가 항목, 범위 밖 요구는 근거를 남기고 제외할 수 있다.
-- 수정은 최소 diff로 하고, 관련 테스트와 repo가 정의한 검증 명령을 다시 실행한다.
-- push 후 스크립트를 다시 foreground로 실행한다.
-
-## Merge 처리
-
-exit 0은 Codex pass 신호(reaction 또는 pass-comment 매칭)를 감지했다는 뜻이다.
-이 경우 사용자의 추가 확인을 기다리지 말고 PR을 merge한다. 단, merge 전 다음을
-확인한다.
-
-1. PR이 draft가 아니어야 한다.
-2. required checks가 통과해야 한다.
-3. 새 actionable comment/review가 없어야 한다.
-4. repo-local guidance 또는 GitHub repo 설정이 정한 merge 방식을 따른다.
-
-권장 확인:
+#### 절차
 
 ```bash
-gh pr view --json number,url,isDraft,baseRefName,headRefName,mergeStateStatus,reviewDecision
-gh pr checks <PR_NUMBER> --watch
-gh api "repos/<owner>/<repo>" --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
+# 2.1 review cwd에서 캡처 — 아직 PR head worktree일 수 있다.
+#  - land-pr.sh 절대 경로 (deployed: .agents/scripts/, source: scripts/, user fallback: ~/.agents/scripts/)
+#  - repo nwo + PR_NUMBER: review-loop pass payload에서 그대로 인계. local
+#    `gh repo view`는 사용하지 않는다 — cross-repo PR이나 CODEX_REPO/URL-style
+#    호출에서 caller checkout과 PR repo가 다를 수 있고, 그 경우 local origin을
+#    `LAND_PR_REPO`로 넘기면 land-pr이 잘못된 repo에서 PR_NUMBER를 조회/merge하거나
+#    pr_view_failed로 실패한다. pass payload의 `repo`/`pr_number`가 review-loop이
+#    실제로 review한 PR의 source of truth.
+LAND_HELPER=""
+for candidate in scripts/land-pr.sh .agents/scripts/land-pr.sh "$HOME/.agents/scripts/land-pr.sh"; do
+  if [ -x "$candidate" ]; then
+    LAND_HELPER="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    break
+  fi
+done
+[ -n "$LAND_HELPER" ] || { echo "land-pr.sh 헬퍼를 찾지 못함" >&2; exit 1; }
+# review-loop pass payload의 repo / pr_number 필드 그대로 사용 (REVIEW_LOOP_HEAD_SHA와 동일한 출처).
+LAND_PR_REPO_VALUE="$REVIEW_LOOP_PASS_REPO"
+PR_NUMBER_VALUE="$REVIEW_LOOP_PASS_PR_NUMBER"
+
+# 2.2 safe non-head cwd에서 land 호출. 서브셸로 cd를 격리해 caller cwd를 보존한다.
+(
+  cd /tmp
+  LAND_PR_REPO="$LAND_PR_REPO_VALUE" bash "$LAND_HELPER" \
+    --expected-head-sha "$REVIEW_LOOP_HEAD_SHA" \
+    "$PR_NUMBER_VALUE"
+)
 ```
 
-merge 방식 선택:
+`REVIEW_LOOP_PASS_REPO` / `REVIEW_LOOP_PASS_PR_NUMBER` / `REVIEW_LOOP_HEAD_SHA`는 모두 review-loop pass payload (`kind:"review_loop_pass_signal"`)의 `repo` / `pr_number` / `head_sha` 필드와 1:1 대응한다. 별도 변수명을 쓰는 이유는 (a) bash snippet에서 어디서 왔는지 명확히 하기 위함, (b) caller가 직접 변수에 담을지 jq로 직접 추출할지 선택할 수 있게 하기 위함이다.
 
-- repo-local guidance가 `squash merge`를 요구하면 `gh pr merge <PR_NUMBER> --squash --delete-branch`.
-- repo가 merge commit만 허용하면 `gh pr merge <PR_NUMBER> --merge --delete-branch`.
-- repo가 rebase merge만 허용하면 `gh pr merge <PR_NUMBER> --rebase --delete-branch`.
-- 명시 정책이 없고 여러 방식이 허용되면 기존 repo 관례를 따른다. 관례가 불명확하면 `--squash`를 기본값으로 사용한다.
+caller cwd는 서브셸로 격리되므로 land-pr이 끝난 뒤에도 그대로 유지된다. dev-cycle 같은 후속 cleanup (linked task worktree 제거, base branch sync 등) 은 caller가 자기 cwd 기준으로 이어서 처리한다.
 
-branch protection, merge queue, required check pending 때문에 즉시 merge가 막히면 같은 방식에 `--auto`를 붙여 auto-merge를 걸 수 있다. 그래도 막히면 차단 사유와 PR URL을 사용자에게 보고한다.
+#### land-pr 동작
 
-## 완료
+- `REVIEW_LOOP_HEAD_SHA`는 review-loop pass payload의 `head_sha` 그대로.
+- land-pr.sh는 `LAND_PR_METHOD` env (default `squash`) 또는 `--method squash|merge|rebase` flag를 받아 그에 맞는 merge를 호출한다. repo-local guidance가 squash를 요구하지 않으면 caller가 명시한다.
+- live head가 expected와 다르면 land-pr이 `expected_head_mismatch` (rc=6)로 거부한다. 이 경우 baseline이 갱신된 새 commit이 있으므로 review-loop을 처음부터 다시 호출해야 한다 (1단계로).
+- branch protection / merge queue / required check pending으로 즉시 land가 막히면 `--auto`를 추가하거나 `LAND_PR_ADMIN_FALLBACK=1`로 admin bypass를 켤 수 있다. 그래도 막히면 차단 사유 + PR URL을 사용자에게 보고한다.
 
-PR URL, merge 방식, check 결과, 처리한 feedback, 남은 리스크를 보고한다.
+land-pr.sh가 rc=0으로 성공하면 envelope의 `result`로 분기:
+- `result: merged` → main에 즉시 land. Path A subscription이 있었다면 `mcp__github__unsubscribe_pr_activity` 호출.
+- `result: queued` (merge queue / auto-merge enabled) → caller에게 enqueued 상태 보고. 후속 모니터링은 caller 책임.
+
+Path A에서는 land 성공 또는 unrecoverable land 실패 직후 `mcp__github__unsubscribe_pr_activity { owner, repo, pullNumber }`로 구독을 해제한다.
+
+### 3. Terminal 신호 처리
+
+review-loop이 terminal payload를 emit하면 codex-loop은 추가 land 시도를 하지 않고 caller에게 상태를 인계한다.
+
+- `result: timeout` / `api_error` / `review_request_unacknowledged` (retryable=true): 사용자에게 사유 보고. 필요시 caller가 재호출.
+- `result: pr_not_detected` / `user_stopped` / `externally_closed` (retryable=false): 사용자에게 사유 보고 후 종료.
+
+terminal payload는 codex-loop이 그대로 caller-visible로 출력한다 (재포장 없음).
+
+## 환경변수
+
+review-loop과 land-pr이 사용하는 env var를 그대로 따른다. codex-loop 자체가 추가하는 env var는 없다.
+
+- review-loop 측: `CODEX_PASS_ACTOR`, `CODEX_PASS_REACTION`, `CODEX_PASS_COMMENT_PATTERN`, `CODEX_REVIEW_REQUEST_BODY`, `CODEX_SILENT_PROBE_DELAY` (Path A), `CODEX_POLL_INTERVAL`, `CODEX_POLL_TIMEOUT`, `CODEX_INITIAL_EMPTY_DELAY`, `CODEX_BASELINE`, `CODEX_REPO`, `CODEX_REVIEW_OUTPUT` (Path B). 자세한 의미는 `commands/review-loop.md` 환경변수 표 참조.
+- land-pr 측: `LAND_FORBIDDEN`, `LAND_PR_METHOD`, `LAND_PR_PRUNE_HEAD_WORKTREE`, `LAND_PR_ADMIN_FALLBACK`, `LAND_PR_REPO`, `LAND_PR_OUTPUT`, `LAND_PR_EXPECTED_HEAD_SHA`. 자세한 의미는 `scripts/land-pr.sh` header 참조.
+
+`LAND_PR_EXPECTED_HEAD_SHA`는 codex-loop이 review-loop pass payload의 `head_sha`로 자동 설정한다. caller가 별도로 export할 필요 없다.
+
+## 인자
+
+- 인자 없음: 현재 branch의 PR 자동 감지.
+- PR 번호 또는 URL: 첫 positional 인자로 전달. 그대로 review-loop / land-pr에 propagate.
+
+`$ codex-loop` 또는 `/codex-loop`만으로 충분. 명시적 PR 번호를 받으면 `/codex-loop 47` 형식.
