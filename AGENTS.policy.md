@@ -68,9 +68,14 @@ If validation cannot be run, report why.
 
 When an agent needs the operator (the human supervising the session) to pick
 between options or approve a non-trivial action, the request body MUST follow
-this schema. The canonical definition lives in
-`docs/adr/0003-operator-decision-request-enforcement.md` (ADR-0003); this
-section is the operating surface that every agent reads at session start.
+this schema. **This section is the canonical runtime contract** — every agent
+enforces the rules from this file alone. `docs/adr/0003-operator-decision-request-enforcement.md`
+(ADR-0003) is the source-repo design record present in repos that carry the
+boilerplate's numbered-docs structure; universal-profile adopter repos
+(AGENTS.policy.md + CLAUDE.md only, no numbered docs) enforce the contract
+directly from this section without needing ADR-0003. If this section ever
+disagrees with ADR-0003, this section wins for runtime; ADR-0003 should be
+updated to match in the source repo.
 
 ### Authority gate (run first, before drafting the request body)
 
@@ -111,10 +116,26 @@ trains the operator to approve reflexively (approval fatigue = security bug).
 - read-only investigation and command output summarization
 - creating issues for unresolved findings when policy says to stop
 - reversible local cleanup
-- implementing a phase/slice that is explicitly enumerated in an accepted
-  ADR's `Implementation phases` (or equivalent) section, AND whose touched
-  paths fall inside the namespaces declared in that ADR's `scope.in[]`. This
-  exception is **subordinate to the authority gate**: if implementation
+- implementing a phase/slice from an accepted ADR — ALL of the following
+  must hold:
+  1. the ADR has a **fenced YAML block** in its `Implementation phases` (or
+     equivalent) section with a `phases:` map containing the named phase
+  2. the phase entry has `applies_must_not_ask: true` (otherwise the 9th
+     never applies; e.g. PHASE-5-style global config phases declare
+     `applies_must_not_ask: false`)
+  3. the phase entry's `fresh_operator_decision_required: false` OR a
+     decision request for this phase has already been answered in the
+     current session
+  4. every changed file's repo-relative path matches at least one glob in
+     that phase's `touched_paths` (POSIX shell glob: `*` single segment,
+     `**` zero-or-more segments, `{a,b}` brace expansion; empty `touched_paths`
+     means must-not-ask never applies)
+
+  Prose / backtick path lists in ADR body text are NOT a substitute for the
+  fenced YAML block. If the block is missing or malformed, this exception
+  does NOT apply and the agent escalates.
+
+  This exception is **subordinate to the authority gate**: if implementation
   surfaces any decision matching one of the 10 ask-categories that the
   ADR's accepted text did not explicitly pre-resolve (named in the Decision
   section, an invariant, or a precondition), re-apply the gate and ask. The
@@ -133,7 +154,7 @@ trains the operator to approve reflexively (approval fatigue = security bug).
 | `recommendation` | yes | option id, OR `no_recommendation_reason` |
 | `reversibility` | yes | enum `reversible \| partly_reversible \| irreversible` + `rollback_path` (for reversible/partly) or `irreversible_reason` |
 | `default_action` | yes | enum `proceed_safe \| wait \| do_read_only_only \| create_issue`. `proceed_safe` forbidden when `authority_gate.requires_operator = true` |
-| `evidence[]` | yes | array with at least one entry. Each entry: `{type: path\|pr\|issue\|adr\|command\|url\|inference, value, confidence?, limitation?}`. `inference` type REQUIRES both `confidence` and `limitation`. **When `authority_gate.requires_operator = true`, at least one entry MUST be a non-`inference` citation** (`path` / `pr` / `issue` / `adr` / `command` / `url`) — there is no free-text escape hatch for operator-required decisions. `path`-type evidence MUST resolve to a file that exists in the repo; line anchors (`:N` or `:N-M`) MUST point to valid line ranges |
+| `evidence[]` | yes | array with at least one entry. Base entry shape: `{type: path\|pr\|issue\|adr\|command\|url\|inference, value, confidence?, limitation?}`. **`type: inference`** REQUIRES `confidence` + `limitation`. **`type: command`** is informational only — it documents what was run but cannot authenticate execution from doc text alone; **`command` evidence does NOT satisfy the `authority_gate.requires_operator = true` gate** (cite the resulting file with `path` evidence if the command produced one). When `authority_gate.requires_operator = true`, at least one entry MUST be a verifiable non-`inference` AND non-`command` citation: `path` / `pr` / `issue` / `adr` / `url`. **Every non-`inference` entry MUST be verifiable in the current repo context**: `path` resolves to existing file (line anchors valid), `adr` resolves to existing `docs/adr/<num>-*.md` file (in universal-profile repos without `docs/adr/`, `type: adr` is REJECTED), `pr`/`issue` use `#<num>` or URL form, `command` is shape-valid command string (informational only), `url` is well-formed `http(s)://`. PHASE-3 validator may introduce authenticated command transcripts (wrapper-produced with cwd / timestamp / exit_code / output digest) later; until then, command evidence is non-gating. See "Hard reject vs soft warning" below for full verification rules |
 | `out_of_scope` | yes | decisions intentionally deferred + rabbit-hole traps the agent might fall into |
 | `authority_gate` | yes | `{category, self_decision_allowed, requires_operator, reason}` |
 
@@ -148,8 +169,9 @@ Counted on rendered markdown:
 ### Hard reject vs soft warning
 
 This table is the deterministic enforcement contract that PHASE-2/3
-validators MUST implement. It mirrors ADR-0003's Hard reject vs soft warning
-table; if the two ever diverge, ADR-0003 wins and this section is the bug.
+validators MUST implement, sourced from this file. ADR-0003 records the
+same table as the source-repo design history; if the two ever diverge,
+**this section wins for runtime** and ADR-0003 must be updated to match.
 
 Hard reject (regex / schema, deterministic):
 
@@ -173,10 +195,31 @@ Hard reject (regex / schema, deterministic):
   `{path, pr, issue, adr, command, url, inference}` and a non-empty `value`;
   for `type: inference`, both `confidence` and `limitation` are required
 - when `authority_gate.requires_operator = true`, `evidence[]` has at least
-  one non-`inference` entry (no free-text escape hatch)
-- `path`-type evidence resolves to an existing file in the repo; if the
-  value includes a line anchor (`path:N` or `path:N-M`), N and M are within
-  the file's actual line range
+  one verifiable non-`inference` AND non-`command` entry (`path` / `pr` /
+  `issue` / `adr` / `url`). `command` evidence is non-gating until PHASE-3
+  introduces an authenticated transcript format
+- **every non-`inference` evidence entry MUST be verifiable in the current
+  repo context** (no dangling citations):
+  - `path` — file MUST exist in the repo; line anchor (`path:N` or
+    `path:N-M`) MUST point to valid line range
+  - `adr` — value MUST resolve to an existing file matching
+    `docs/adr/<number>-*.md` in the current repo. In universal-profile
+    repos (no `docs/adr/` directory), `type: adr` evidence is REJECTED
+    — agents MUST cite a different verifiable type or use `inference`
+  - `pr` — value MUST be `#<number>` or full URL with numeric PR id;
+    validator may verify via `gh pr view` when network available
+  - `issue` — value MUST be `#<number>` or full URL with numeric issue
+    id; validator may verify via `gh issue view` when network available
+  - `command` — `value` MUST be a runnable command string (validator
+    checks shape, does not execute). **`command` evidence is informational
+    only and does NOT satisfy the `requires_operator=true` gate** — doc
+    text cannot authenticate that the command actually ran with the
+    claimed result. To cite execution, use `path` evidence pointing at
+    the captured output file (which IS verified to exist). PHASE-3
+    validator may later introduce a wrapper-produced transcript format
+    (cwd / timestamp / exit_code / output digest) that re-enables
+    `command` gating; until then, command evidence is non-gating
+  - `url` — value MUST be a well-formed `http(s)://` URL
 - word budget thresholds (warn ≥ 450, reject ≥ 700 unless `high_risk: true`,
   hard reject ≥ 900)
 - `authority_gate` shape: `category` is one of the 10 ask-categories above,
@@ -220,8 +263,12 @@ implemented. Until PHASE-2 ships, the canonical rule in this section (layer
 Layers 3-4 (agent-dialog kind, optional Claude Code Stop hook) are tracked
 in ADR-0003 as later phases.
 
-Glossary term ownership: `operator_decision_request`, `authority_gate`,
-`must_not_ask_category`, `defense_in_depth_stack` (all defined in ADR-0003).
+Glossary term files for `operator_decision_request`, `authority_gate`,
+`must_not_ask_category`, and `defense_in_depth_stack` provide supporting
+term ownership in repos that carry the boilerplate's numbered-docs structure
+(under `docs/glossary/`). The runtime contract above is enforced from this
+section alone — absent glossary files in universal-profile repos do NOT
+weaken enforcement.
 
 ## Companion policy files
 
