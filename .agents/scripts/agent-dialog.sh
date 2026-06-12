@@ -62,6 +62,7 @@ Subcommands:
   transcript  --session <id>
   abandon     --session <id> [--reason <text>] [--json]
   compose-context --session <id> [--from-decision <message_id>] [--json]
+  cleanup     --session <id> [--force] [--json]
 
 Note kinds:
   request     initiator's request body
@@ -91,62 +92,106 @@ now_utc() {
 # --- Lock handling ----------------------------------------------------------
 
 acquire_lock() {
-  # Symlink-based lock with atomic-rename stale salvage.
+  # Symlink-based lock with recovery-gated stale removal.
   #
   # `ln -s $$ lockfile` collapses lock acquisition and owner-PID recording
   # into one atomic syscall. Two racers cannot both create the lock.
   #
-  # Stale recovery is the tricky part. Naive `rm -f $lockfile` after
-  # observing a dead PID is racy: writer A removes the stale lock and
-  # creates a new live one, then writer B (which already decided the lock
-  # was stale a moment earlier) deletes A's live lock and creates its own.
-  # Both writers would now believe they hold the lock.
+  # Stale recovery is the tricky part. The previous (pre-XAR-1A.2c.d)
+  # design used an atomic-rename salvage: `mv $lockfile $salvage`, then
+  # readlink-verify the salvaged entry, then put it back if the salvaged
+  # target had become live. Codex review 2026-05-27 (round 4) flagged
+  # a 3-way race in that approach: writer A salvages the dead lock and
+  # acquires a fresh live lock; writer B (which already read the old
+  # dead PID before A's recovery) reaches its own `mv` and renames A's
+  # live lock into B's salvage path; while B is in the readlink-and-
+  # putback window, writer C does `ln -s $lockfile` and acquires.
+  # A and C now both believe they hold the lock, since A has no way
+  # to observe that its symlink was moved out from under it.
   #
-  # Fix: salvage the stale lock via atomic rename to a per-process unique
-  # path. `mv` of a single file is atomic; only one racer can move the
-  # current lockfile out from under everyone else. After moving it we
-  # re-confirm the target was still dead before discarding the salvaged
-  # entry. Other racers see "lockfile gone" and loop back to the create.
+  # Fix (XAR-1A.2c.d): serialize stale removal under a separate
+  # recovery lock at `$lockfile.recovery`. While we hold the recovery
+  # lock, no other writer can rm the main lockfile (they would need
+  # the same recovery lock first), so reading the main lockfile's
+  # target and removing it become effectively atomic from the
+  # perspective of other writers. The 3-way race is closed: B's
+  # attempt to remove A's fresh live lock cannot happen because B is
+  # blocked at the recovery lock until A finishes its rm and releases.
+  # When B finally proceeds, B re-reads the lockfile, sees A's live
+  # PID, and dies cleanly with `held by live PID`.
   #
-  # The exit trap also re-checks ownership before removing — if some
-  # later process took the lock (after our PID died or the lock was
-  # released elsewhere), we must not delete their live lock.
-  local sdir="$1" lockfile="$sdir/.write.lock"
+  # The recovery lock itself can become stale (process dies mid-
+  # recovery). Treat it symmetrically: a live recovery holder gives
+  # exit code 5 "recovery in progress"; a dead recovery holder is
+  # cleaned with rm and we retry. Recovery is short-lived (one
+  # readlink + one rm), so the chance of a stuck recovery lock is
+  # vanishingly small.
+  #
+  # The exit trap re-checks ownership before removing the main lock —
+  # if some later process took the lock (after our PID died or the
+  # lock was released elsewhere), we must not delete their live lock.
+  local sdir="$1" lockfile="$sdir/.write.lock" recovery="$sdir/.write.recovery"
+  # Install ownership-checked cleanup early so that *any* exit path
+  # — normal, ERR via `set -e`, INT, TERM — releases the recovery
+  # lock if we are mid-recovery and the main lock if we are holding
+  # it. Codex review 2026-05-27 round 8 flagged that the previous
+  # design only set the EXIT trap after a successful `ln -s` on the
+  # main lock, leaving an interrupted recovery (SIGTERM, ERR, helper
+  # `die` between recovery acquisition and recovery rm) to strand
+  # the session in the stale-recovery diagnostic path.
+  #
+  # SIGKILL still bypasses this — no shell-only primitive can survive
+  # SIGKILL during a half-completed recovery — but every reachable
+  # bash-level termination path now runs `_release_owned_locks`.
+  _LOCK_TRAP_LOCKFILE="$lockfile"
+  _LOCK_TRAP_RECOVERY="$recovery"
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"' EXIT
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"; trap - INT; kill -INT $$' INT
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"; trap - TERM; kill -TERM $$' TERM
   while true; do
     local ln_err
     ln_err="$(ln -s "$$" "$lockfile" 2>&1)" && {
-      trap "_release_owned_lock '$lockfile' '$$'" EXIT
+      # Opportunistic stale-recovery cleanup. Codex review
+      # 2026-05-27 round 9: when a previous recovery process was
+      # SIGKILL'd between `rm lockfile` and `rm recovery`, the main
+      # lockfile is gone (so our `ln -s` just succeeded) but the
+      # recovery symlink is left behind pointing at a dead PID.
+      # Without this cleanup the next stale-main-lock recovery
+      # would hit the manual-cleanup diagnostic. We hold the live
+      # main lock, so no other writer can be inside the recovery
+      # critical section right now — they would die on our PID at
+      # the live-lock check before reaching recovery. That makes
+      # `rm $recovery` safe under our exclusive ownership, with
+      # one nuance: another writer's recovery may be mid-flight
+      # right at this instant (they acquired recovery while the
+      # main lock was still stale, then we won the race to claim
+      # main after they rm'd lockfile). Skip the cleanup when the
+      # recovery holder is still a live PID — they own that file.
+      local _rpid_after
+      _rpid_after="$(readlink "$recovery" 2>/dev/null || true)"
+      if [[ -n "$_rpid_after" ]] && ! _pid_is_live "$_rpid_after"; then
+        rm -f "$recovery"
+      fi
       return 0
     }
 
     # `ln -s` failed. The loop below assumes the failure was EEXIST
-    # (lockfile already present — contention) and tries either live-PID
-    # rejection or stale salvage. If the failure was for a different
-    # reason — sandbox EACCES, read-only fs, ENOSPC, ENOENT — no
-    # lockfile was ever created, `readlink` returns empty, the live-PID
-    # check is skipped, salvage `mv` has nothing to move, and the loop
-    # spins forever (observed under Codex sandbox writing into
-    # $HOME/.agent-dialog).
+    # (lockfile already present — contention) and goes through live-PID
+    # rejection or recovery-gated cleanup. If the failure was for a
+    # different reason — sandbox EACCES, read-only fs, ENOSPC, ENOENT
+    # — no lockfile was ever created, `readlink` returns empty, the
+    # live-PID check is skipped, and the loop must NOT spin forever
+    # (observed under Codex sandbox writing into $HOME/.agent-dialog).
     #
     # An absent lockfile after `ln -s` failure has two valid causes:
     #   (a) Real write failure — directory is unwritable so the symlink
     #       was never created.
     #   (b) Race — `ln -s` failed because the lockfile existed at the
-    #       syscall, but another writer salvaged it before we reached
-    #       this check.
-    # Codex review 2026-05-27 (round 2) flagged the original bare
-    # absence check: it died on (b) as well, turning a normal stale-
-    # lock recovery race into a hard error. Codex review round 3
-    # additionally flagged a regular-file writability probe as too
-    # permissive — on filesystems that allow regular files but reject
-    # symlinks (FAT/exFAT, some network mounts), the probe would
-    # succeed while every `ln -s` keeps failing, recreating the
-    # infinite loop. Probe with a symlink instead: it is the exact
-    # syscall that drives lock creation, so its success/failure is
-    # the correct discriminator. If the symlink probe succeeds we
-    # are in case (b); retry the loop. If it fails the directory
-    # rejects symlink creation; surface the captured `ln` error so
-    # the caller does not hang.
+    #       syscall, but another writer's recovery removed it before
+    #       we reached this check.
+    # Probe with a symlink (the exact syscall that drives lock creation)
+    # to distinguish: success → case (b), retry; failure → case (a),
+    # die with the captured `ln` error.
     if [[ ! -L "$lockfile" && ! -e "$lockfile" ]]; then
       local probe="$lockfile.probe.$$.$RANDOM"
       if ln -s "probe-$$" "$probe" 2>/dev/null; then
@@ -156,67 +201,183 @@ acquire_lock() {
       die 5 "write lock cannot be created in $sdir: ${ln_err:-symlink creation failed without diagnostic}"
     fi
 
-    # Lock exists. Read the target PID in one syscall.
+    # Lockfile exists. Read the target PID in one syscall.
     local existing_pid=""
     existing_pid="$(readlink "$lockfile" 2>/dev/null || true)"
-    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+    if [[ -n "$existing_pid" ]] && _pid_is_live "$existing_pid"; then
       die 5 "write lock held by live PID $existing_pid at $lockfile"
     fi
 
-    # Target PID is missing or dead. Salvage via atomic rename so that
-    # at most one racer can claim the right to remove the stale lock.
-    local salvage="$lockfile.salvage.$$.$RANDOM"
-    local mv_err
-    mv_err="$(mv "$lockfile" "$salvage" 2>&1)" && {
-      # We hold the salvaged stale lock. Re-confirm the salvaged target
-      # was indeed dead — if a fresh owner had grabbed the lock between
-      # our readlink and mv, we would have salvaged a *live* lock by
-      # mistake and must abort instead of silently consuming it.
-      local salvaged_pid=""
-      salvaged_pid="$(readlink "$salvage" 2>/dev/null || true)"
-      if [[ -n "$salvaged_pid" ]] && kill -0 "$salvaged_pid" 2>/dev/null; then
-        # Put the live lock back where we found it. If something else
-        # already created a new lockfile in the meantime, drop ours
-        # rather than overwrite — the other lock is the authoritative
-        # one and ours is the salvaged stale state.
-        if ! mv -n "$salvage" "$lockfile" 2>/dev/null; then
-          rm -f "$salvage"
-        fi
-        die 5 "write lock raced from PID $salvaged_pid; aborting salvage"
-      fi
-      printf 'agent-dialog: stale lock from PID %s, recovering\n' "${existing_pid:-?}" >&2
-      rm -f "$salvage"
-      # Loop and try the atomic ln -s create.
-      continue
-    }
-    # `mv` failed. Two cases must be distinguished:
-    #   (a) Another racer salvaged the stale lockfile out from under us
-    #       (the lockfile is now gone). Retry — our next `ln -s` should
-    #       succeed.
-    #   (b) The session directory is not writable (sandbox EACCES,
-    #       read-only fs, ENOSPC). The stale lockfile is still present
-    #       and cannot be renamed. The previous behaviour treated every
-    #       `mv` failure as case (a) and looped forever; codex review
-    #       2026-05-27 flagged this. Detect (b) by observing that the
-    #       lockfile is still here and fail fast with the captured `mv`
-    #       diagnostic so the caller can surface the real filesystem
-    #       error instead of hanging.
-    if [[ -L "$lockfile" || -e "$lockfile" ]]; then
-      die 5 "write lock stale-salvage failed in $sdir: ${mv_err:-cannot rename .write.lock (filesystem not writable?)}"
-    fi
-    # Lockfile disappeared between our ln -s and mv — another racer
-    # salvaged it. Loop and retry.
+    # Dead lockfile owner. Recover under the recovery lock so that at
+    # most one writer at a time can remove the main lockfile.
+    _attempt_stale_recovery "$sdir" "$lockfile" "$recovery"
+    # _attempt_stale_recovery either returned (retry) or died. Loop.
   done
 }
 
-_release_owned_lock() {
-  # Only remove the lock if it still records our PID. Otherwise a later
-  # process has already claimed it and we must not strip them.
-  local lockfile="$1" my_pid="$2" owner
-  owner="$(readlink "$lockfile" 2>/dev/null || true)"
-  if [[ "$owner" == "$my_pid" ]]; then
-    rm -f "$lockfile"
+_attempt_stale_recovery() {
+  # Single attempt to remove a stale lockfile under the recovery lock.
+  # Returns 0 on success (caller should re-enter the acquire loop) or
+  # exits via `die 5` for unrecoverable conditions (writability,
+  # live recovery contention).
+  local sdir="$1" lockfile="$2" recovery="$3"
+
+  local rec_err
+  rec_err="$(ln -s "$$" "$recovery" 2>&1)" && {
+    # Test-only hook: when `AGENT_DIALOG_TEST_PAUSE_AFTER_RECOVERY_ACQUIRE`
+    # is set to a positive number, sleep that many seconds while
+    # holding the recovery lock. This is the only deterministic way
+    # to test the EXIT/INT/TERM trap path (recovery normally
+    # completes in microseconds, far below any signal-delivery
+    # window). The variable is intentionally noisy and undocumented
+    # outside the test suite; production callers never set it.
+    if [[ -n "${AGENT_DIALOG_TEST_PAUSE_AFTER_RECOVERY_ACQUIRE:-}" ]]; then
+      sleep "${AGENT_DIALOG_TEST_PAUSE_AFTER_RECOVERY_ACQUIRE}"
+    fi
+    # We hold the recovery lock. Re-read the main lockfile under this
+    # gate. The only writers who could change the main lockfile's
+    # target are those that pass through this same recovery lock, so
+    # we are guaranteed the target cannot mutate while we hold it.
+    # Cases:
+    #   - non-empty PID, dead: classic stale recovery — rm.
+    #   - empty readlink: lockfile is either a regular file leftover
+    #     (corruption, manual operator action, or a stray editor
+    #     temp file) or a malformed symlink. Codex review 2026-05-27
+    #     round 5 flagged that without explicit handling the loop
+    #     would spin forever — the old `mv` salvage path handled
+    #     these uniformly because `mv` does not care about file
+    #     type. Under the recovery gate no other writer can replace
+    #     the file, so it is safe to remove.
+    #   - non-empty PID, live: a writer re-acquired the lock in the
+    #     window between acquire_lock's liveness sample and our
+    #     recovery acquisition (e.g., a kernel PID reuse hit a fresh
+    #     live process at the same number, or an intervening recovery
+    #     completed and a new writer claimed). Do NOT remove a live
+    #     lock — fall through to the caller's retry, which will see
+    #     the live PID on its next iteration and die cleanly.
+    local current_pid
+    current_pid="$(readlink "$lockfile" 2>/dev/null || true)"
+    if [[ -z "$current_pid" ]]; then
+      if [[ -L "$lockfile" || -e "$lockfile" ]]; then
+        printf 'agent-dialog: ownerless lock at %s, recovering\n' "$lockfile" >&2
+        rm -f "$lockfile"
+      fi
+    elif ! _pid_is_live "$current_pid"; then
+      printf 'agent-dialog: stale lock from PID %s, recovering\n' "$current_pid" >&2
+      rm -f "$lockfile"
+    fi
+    rm -f "$recovery"
+    return 0
+  }
+
+  # Recovery `ln -s` failed. Same EACCES vs EEXIST distinction as the
+  # main loop: if the recovery file is absent, this is a writability
+  # failure and must die.
+  if [[ ! -L "$recovery" && ! -e "$recovery" ]]; then
+    local probe="$recovery.probe.$$.$RANDOM"
+    if ln -s "probe-$$" "$probe" 2>/dev/null; then
+      rm -f "$probe"
+      return 0
+    fi
+    die 5 "write lock recovery cannot be created in $sdir: ${rec_err:-symlink creation failed without diagnostic}"
   fi
+
+  # Recovery file exists — someone else is recovering, or it is stale.
+  local rpid
+  rpid="$(readlink "$recovery" 2>/dev/null || true)"
+  if [[ -n "$rpid" ]] && _pid_is_live "$rpid"; then
+    die 5 "write lock recovery in progress by live PID $rpid at $recovery"
+  fi
+
+  # rpid is empty or dead. Before declaring the recovery lock stale,
+  # re-check existence: codex review 2026-05-27 round 7 flagged a
+  # benign-completion race — writer A held the recovery lock at the
+  # time of our ln-s, then completed and rm'd recovery between our
+  # ln-s and our readlink. readlink now returns empty, but the file
+  # is gone (not stale). Retry the main loop instead of demanding
+  # manual cleanup for a normal completion event.
+  if [[ ! -L "$recovery" && ! -e "$recovery" ]]; then
+    return 0
+  fi
+  # File present at existence check. Codex round 14 follow-up flake:
+  # readlink can return empty when the file was momentarily gone
+  # between ln-s failure and readlink (writer A rm'd it), but by the
+  # existence check below a new writer C may have re-created
+  # recovery with C's PID. Re-readlink to avoid mistaking C's live
+  # recovery for stale debris.
+  if [[ -z "$rpid" ]]; then
+    rpid="$(readlink "$recovery" 2>/dev/null || true)"
+    if [[ -n "$rpid" ]] && _pid_is_live "$rpid"; then
+      die 5 "write lock recovery in progress by live PID $rpid at $recovery"
+    fi
+    if [[ ! -L "$recovery" && ! -e "$recovery" ]]; then
+      return 0
+    fi
+  fi
+
+  # Recovery holder is dead — recovery lock itself went stale.
+  #
+  # Auto-cleanup of a stale recovery lock is intentionally NOT done
+  # here. Codex review 2026-05-27 round 6 flagged that any auto-
+  # cleanup of the recovery lock has the same TOCTOU race as the
+  # original main-lock salvage: two concurrent writers can both read
+  # the same dead recovery PID, both decide to clean, and the second
+  # writer's `rm` deletes a fresh recovery symlink the first writer
+  # has already acquired. The race recreates exactly the mutex
+  # violation that the recovery lock was introduced to close.
+  #
+  # There is no ownership-preserving primitive in shell that can
+  # safely auto-cleanup a stale symlink under concurrent contention
+  # (every salvage-and-verify scheme has the same flaw, one level
+  # deeper). So we die fast and surface a precise diagnostic that
+  # tells the operator the exact path to remove. The cost is reduced
+  # resilience to a recovery-mid-crash; the benefit is no race.
+  # Recovery is a single readlink + single rm, so the crash window
+  # is vanishingly small in practice — the file should almost never
+  # be observed stale outside SIGKILL during that microsecond.
+  die 5 "write lock recovery is stale at $recovery (was held by dead PID ${rpid:-<unknown>}); manually remove it ('rm $recovery') then run 'agent-dialog.sh cleanup --session <id>' to clear the stale main lock"
+}
+
+_pid_is_live() {
+  # Validate-then-test PID liveness. Bare `kill -0 $pid` is unsafe
+  # because bash interprets `0` as the current process group and
+  # negative numbers as broadcast targets — a malformed or planted
+  # lockfile pointing at `0`/`-1`/non-numeric content would
+  # masquerade as a live owner and block recovery indefinitely.
+  # Accept only positive decimal PIDs before signalling.
+  local pid="${1:-}"
+  if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null
+}
+
+# Trap state. The EXIT/INT/TERM traps installed by acquire_lock and
+# cmd_cleanup reference these globals BY NAME inside single-quoted
+# trap commands, so the path values are expanded when the trap fires,
+# not interpolated into the trap string at install time. Codex review
+# 2026-06-10 (P2) flagged the previous double-quoted interpolation:
+# an AGENT_DIALOG_HOME containing a single quote produced a trap
+# string with unbalanced quotes that raised a syntax error on EXIT
+# and leaked `.write.recovery`. Only one lock acquisition happens per
+# helper process, so a single global pair is unambiguous.
+_LOCK_TRAP_LOCKFILE=""
+_LOCK_TRAP_RECOVERY=""
+
+_release_owned_locks() {
+  # Composite cleanup for both the main and recovery locks, invoked
+  # from the EXIT/INT/TERM trap installed at acquire_lock entry.
+  # Each file is removed only if it still records our PID, so a
+  # crash that races with another writer reclaiming the lock cannot
+  # strip the new owner's symlink.
+  local lockfile="$1" recovery="$2" my_pid="$3" f owner
+  for f in "$lockfile" "$recovery"; do
+    [[ -n "$f" ]] || continue
+    owner="$(readlink "$f" 2>/dev/null || true)"
+    if [[ "$owner" == "$my_pid" ]]; then
+      rm -f "$f"
+    fi
+  done
 }
 
 # --- Validation -------------------------------------------------------------
@@ -1868,6 +2029,176 @@ cmd_compose_context() {
   fi
 }
 
+cmd_cleanup() {
+  # Operator-facing recovery from a stale-lock outage that
+  # `acquire_lock` cannot self-recover (SIGKILL during the recovery
+  # critical section). Removes `.write.lock` and `.write.recovery`
+  # only when no live writer would race with the removal.
+  #
+  # Serialization: cleanup acquires `.write.recovery` itself before
+  # touching `.write.lock`, using the same recovery-lock primitive
+  # that normal recovery uses. This closes the cleanup TOCTOU codex
+  # review 2026-05-27 round 8 flagged — a writer cannot complete
+  # stale-lock recovery and acquire a fresh live lock between
+  # cleanup's liveness check and its `rm`, because the recovery
+  # lock serialises both paths through the same gate.
+  #
+  # If `.write.recovery` is already stale, cleanup force-removes it
+  # (that is the very reason cleanup exists) and then competes to
+  # claim a fresh recovery lock. Two concurrent cleanups resolve
+  # the same way two concurrent recoveries do: one wins, the other
+  # observes the live winner and refuses with `recovery in progress`
+  # — the operator retries.
+  local session="" emit_json="false" force="false"
+  while (( $# )); do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      --json)    emit_json="true"; shift ;;
+      --force)   force="true"; shift ;;
+      *) die 3 "cleanup: unknown argument: $1" ;;
+    esac
+  done
+
+  [[ -n "$session" ]] || die 3 "cleanup: --session required"
+  validate_session_id "$session"
+
+  local sdir="$SESSIONS_DIR/$session"
+  [[ -d "$sdir" ]] || die 3 "cleanup: session not found: $session"
+
+  local lockfile="$sdir/.write.lock"
+  local recovery="$sdir/.write.recovery"
+  local removed=()
+
+  _check_and_remove_stale_lock() {
+    local f="$1" label="$2"
+    if [[ ! -L "$f" && ! -e "$f" ]]; then
+      return 0
+    fi
+
+    if [[ -L "$f" ]]; then
+      # Symlink backend: liveness via readlink + _pid_is_live
+      # (positive-decimal PID validation + kill -0).
+      local pid
+      pid="$(readlink "$f" 2>/dev/null || true)"
+      if [[ -n "$pid" ]] && _pid_is_live "$pid"; then
+        # Live PID owns the lock. Codex review 2026-05-27 round 10
+        # flagged that `--force` previously removed live locks here,
+        # which would let `cleanup --force` strip an in-flight
+        # writer's mutex and let a second process `ln -s` a new
+        # lockfile and enter the critical section concurrently.
+        # Live locks ALWAYS refuse regardless of --force; --force is
+        # only for ownerless / dead-PID / foreign-regular-file
+        # debris.
+        die 4 "cleanup: $label held by live PID $pid; live locks are never removed by cleanup (stop or kill the writer first if needed)"
+      fi
+      rm -f "$f"
+      removed+=("$label (symlink, was PID ${pid:-<malformed>})")
+      return 0
+    fi
+
+    # Regular file at the lockfile path. The current backend only
+    # creates symlinks, so a regular file is foreign — it could be
+    # a manual `touch` from the operator, debris from a different
+    # tool, or an unexpected file. Without an out-of-band liveness
+    # primitive we cannot prove no live process depends on it, so
+    # refuse to remove unless the operator explicitly overrides.
+    if [[ "$force" != "true" ]]; then
+      die 4 "cleanup: $label is an unexpected regular file (not a symlink lock); pass --force to remove"
+    fi
+    rm -f "$f"
+    removed+=("$label (forced removal of regular file)")
+  }
+
+  # Claim the recovery lock for ourselves so our lockfile rm is
+  # serialised against any concurrent helper recovery path. Codex
+  # review 2026-05-27 round 9 flagged two earlier designs:
+  #   (a) auto-removing stale recovery before re-acquiring opens a
+  #       concurrent-cleanup race — two cleanups both observe stale
+  #       state, one acquires fresh, the other rm's the fresh
+  #       acquisition; same TOCTOU the recovery primitive was meant
+  #       to close.
+  #   (b) holding recovery across `die` paths leaks the lock when
+  #       cleanup refuses (foreign regular file, live main lock).
+  #
+  # Resolution: do not auto-rm stale recovery. Try `ln -s` directly;
+  # any failure surfaces a precise diagnostic naming what to do
+  # next. Install an ownership-checked EXIT trap so any exit path
+  # (success, die, signal) releases the recovery we hold.
+  # Arm ownership-checked traps BEFORE the `ln -s` syscall. Codex
+  # review 2026-05-27 round 11 flagged the previous post-acquire
+  # trap installation: a kill in the gap between `ln -s` returning
+  # and `trap` being installed would leave `.write.recovery` owned
+  # by a dead PID. The traps only rm when the owner matches our PID,
+  # so installing them before acquisition is safe — if we never end
+  # up owning recovery, the trap is a no-op on exit.
+  _LOCK_TRAP_LOCKFILE=""
+  _LOCK_TRAP_RECOVERY="$recovery"
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"' EXIT
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"; trap - INT; kill -INT $$' INT
+  trap '_release_owned_locks "$_LOCK_TRAP_LOCKFILE" "$_LOCK_TRAP_RECOVERY" "$$"; trap - TERM; kill -TERM $$' TERM
+
+  local rec_err
+  rec_err="$(ln -s "$$" "$recovery" 2>&1)" || {
+    local rpid
+    rpid="$(readlink "$recovery" 2>/dev/null || true)"
+    if [[ -n "$rpid" ]] && _pid_is_live "$rpid"; then
+      # PID-only liveness can produce false positives when the OS
+      # has reused the recovered PID for an unrelated process
+      # (codex review 2026-05-27 round 12). Recovery is a single
+      # readlink + single rm, so an observed live recovery that
+      # persists for any noticeable time is more likely a false
+      # positive than a real in-flight recovery. Operators can
+      # verify with \`ps $rpid\` and, if the PID is not an
+      # agent-dialog writer, escape via manual rm.
+      die 4 "cleanup: recovery at $recovery appears held by live PID $rpid; if this is a real active recovery, wait for it to finish; if PID $rpid is unrelated (kernel PID reuse — verify with 'ps $rpid'), remove the file manually: rm '$recovery'; then rerun cleanup --session $session"
+    fi
+    if [[ -L "$recovery" || -e "$recovery" ]]; then
+      # Stale recovery file (dead owner) blocking our acquisition.
+      # Codex review round 14: the original "operator must rm
+      # manually" UX defeated cleanup's purpose. Allow --force to
+      # rm-and-retry inside cleanup, with an explicit trade-off
+      # acknowledgment: concurrent --force cleanups can race on
+      # this rm, same shape as the 3-way race we closed for normal
+      # writers. The operator who passes --force accepts that
+      # multiple concurrent cleanup invocations are unsafe.
+      if [[ "$force" != "true" ]]; then
+        die 4 "cleanup: stale recovery at $recovery (was PID ${rpid:-<unknown>}); pass --force to clear it and proceed (single-cleanup-at-a-time contract — do not run concurrent --force cleanups)"
+      fi
+      rm -f "$recovery"
+      removed+=(".write.recovery (forced clear of stale PID ${rpid:-<unknown>})")
+      # Retry acquisition. If a concurrent --force cleanup grabbed
+      # the slot in between, refuse — we will not steal a freshly-
+      # acquired recovery lock even with --force.
+      if ! ln -s "$$" "$recovery" 2>/dev/null; then
+        local rpid_now
+        rpid_now="$(readlink "$recovery" 2>/dev/null || true)"
+        die 4 "cleanup: recovery taken by PID ${rpid_now:-?} during --force clear; retry"
+      fi
+    else
+      die 4 "cleanup: recovery cannot be created in $sdir: ${rec_err:-symlink creation failed}"
+    fi
+  }
+
+  _check_and_remove_stale_lock "$lockfile" ".write.lock"
+
+  if [[ "$emit_json" == "true" ]]; then
+    local removed_json
+    removed_json="$(printf '%s\n' "${removed[@]:-}" | jq -R . | jq -s -c 'map(select(length > 0))')"
+    jq -n --arg sid "$session" --argjson removed "$removed_json" \
+      '{schema_version:1, kind:"agent_dialog_cleanup", session_id:$sid, removed:$removed}'
+  else
+    if [[ "${#removed[@]}" -eq 0 ]]; then
+      printf 'Session %s: no stale lock files to clean\n' "$session"
+    else
+      printf 'Session %s: cleaned\n' "$session"
+      local entry
+      for entry in "${removed[@]}"; do
+        printf '  - %s\n' "$entry"
+      done
+    fi
+  fi
+}
+
 # --- Main -------------------------------------------------------------------
 
 main() {
@@ -1888,6 +2219,7 @@ main() {
     transcript) cmd_transcript "$@" ;;
     abandon)    cmd_abandon "$@" ;;
     compose-context) cmd_compose_context "$@" ;;
+    cleanup)    cmd_cleanup "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 3 ;;
   esac

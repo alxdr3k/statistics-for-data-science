@@ -576,6 +576,10 @@ required	docs/04_IMPLEMENTATION_PLAN.md	always: status ledger
 required	docs/current/CODE_MAP.md	always per repo AGENTS.md
 conditional	docs/11_CI_CD.md	CI/CD or required check changes
 conditional	docs/adr/*.md	architecture/scope decision changes
+conditional	docs/04_IMPLEMENTATION_PLAN.history.md	archive: closed-cycle slice audit (per 04_IMPLEMENTATION_PLAN.policy.md)
+conditional	docs/history/implementation-plan/*.md	archive: per-track shards after history sharding (per 04_IMPLEMENTATION_PLAN.policy.md "Sharding automation")
+conditional	docs/04_IMPLEMENTATION_PLAN.parking-lot.md	parking lot: long-term deferred slice audit (per 04_IMPLEMENTATION_PLAN.policy.md)
+conditional	docs/parking-lot/implementation-plan/*.md	parking lot: per-track shards after parking-lot sharding (per 04_IMPLEMENTATION_PLAN.policy.md "Parking-lot sharding automation")
 ```
 
 필드:
