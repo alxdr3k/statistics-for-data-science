@@ -53,7 +53,9 @@ usage() {
 usage: agent-dialog.sh <subcommand> [options]
 
 Subcommands:
-  init        --initiator codex|claude --topic <text> [--repo <path>] [--json]
+  init        --initiator codex|claude --topic <text> [--repo <path>]
+              [--dialogue-mode adversarial_dialogue|parallel_review] [--json]
+              (default dialogue mode: parallel_review)
   write       --session <id> --kind request|response|decision|note
               --sender codex|claude|user [--recipient <agent>]
               [--parent <message_id>] --body-file <path> [--json]
@@ -63,6 +65,9 @@ Subcommands:
   abandon     --session <id> [--reason <text>] [--json]
   compose-context --session <id> [--from-decision <message_id>] [--json]
   cleanup     --session <id> [--force] [--json]
+  whose-turn  --session <id> [--json]
+  watch       --session <id> --agent codex|claude [--interval <sec>]
+              [--timeout <sec>] [--notify desktop] [--json]
 
 Note kinds:
   request     initiator's request body
@@ -699,23 +704,53 @@ validate_body() {
   esac
 }
 
+_session_dialogue_mode() {
+  # XAR-1A.7 (ADR-0004 INV-0004-10): dialogue topology mode getter with
+  # read-path backward compatibility. Sessions created before XAR-1A.7
+  # have no dialogue_mode field — they were all sequential adversarial
+  # exchanges, so the absent-field default is adversarial_dialogue, NOT
+  # the new-session default (parallel_review). Silently reclassifying an
+  # old session as parallel would flip its role/sequencing rules
+  # mid-flight.
+  local sj="$1"
+  jq -r '.dialogue_mode // "adversarial_dialogue"' "$sj"
+}
+
 validate_role() {
   # XAR-1A.2c.c: body input is the JSON snapshot from cmd_write
   # (DEC-037) so target_agent enforcement reads the same bytes that
   # validate_body checked and persist will write.
-  local kind="$1" sender="$2" initiator="$3" reviewer="$4" body_json="${5:-}"
+  #
+  # XAR-1A.7 (INV-0004-10): role rules are dialogue_mode-dependent for
+  # response and decision. adversarial_dialogue keeps the v1 rules.
+  # parallel_review: both agents act as reviewers of the user's question
+  # (each writes its own response), and the decision artifact belongs to
+  # the user alone (Q-052 — agent self-dispositions would recreate the
+  # adversarial topology inside parallel mode; agents' positions are
+  # already their response artifacts).
+  local kind="$1" sender="$2" initiator="$3" reviewer="$4" body_json="${5:-}" dmode="${6:-adversarial_dialogue}"
   case "$kind" in
     request)
       [[ "$sender" == "$initiator" ]] \
         || die 4 "request sender must be initiator ($initiator), got $sender"
       ;;
     response)
-      [[ "$sender" == "$reviewer" ]] \
-        || die 4 "response sender must be reviewer ($reviewer), got $sender"
+      if [[ "$dmode" == "parallel_review" ]]; then
+        [[ "$sender" == "$initiator" || "$sender" == "$reviewer" ]] \
+          || die 4 "response sender must be a session agent ($initiator|$reviewer) in parallel_review, got $sender"
+      else
+        [[ "$sender" == "$reviewer" ]] \
+          || die 4 "response sender must be reviewer ($reviewer), got $sender"
+      fi
       ;;
     decision)
-      [[ "$sender" == "$initiator" || "$sender" == "user" ]] \
-        || die 4 "decision sender must be initiator ($initiator) or user, got $sender"
+      if [[ "$dmode" == "parallel_review" ]]; then
+        [[ "$sender" == "user" ]] \
+          || die 4 "decision sender must be user in parallel_review (Q-052: the user decision is the only decision artifact), got $sender"
+      else
+        [[ "$sender" == "$initiator" || "$sender" == "user" ]] \
+          || die 4 "decision sender must be initiator ($initiator) or user, got $sender"
+      fi
       ;;
     note)
       # design/workflows/cross-agent-review-workflow.md: note sender is `user`.
@@ -758,6 +793,45 @@ latest_message_kind() {
   fi
 }
 
+_heal_interrupted_terminal_close() {
+  # XAR-1A.2c close partial-failure self-repair. cmd_write persists the
+  # terminal close decision message and flips session.json.status in two
+  # separate steps inside the same lock window. A crash between the two
+  # (SIGKILL, power loss — the EXIT trap cannot run) leaves a session
+  # whose latest protocol message is a session_close=true decision while
+  # session.json still says "open". Every later write would then pass the
+  # status gate and append to a session whose protocol history already
+  # ended with a terminal close.
+  #
+  # Callers invoke this while HOLDING the write lock, right after the
+  # under-lock status re-read confirms "open". When the mismatch is
+  # present, flip status to closed (with a self-repair timestamp so the
+  # healed transition is distinguishable from a normal close in audit)
+  # and return 0; the caller then rejects its operation as closed-session.
+  # Returns 1 when the session state is consistent (no heal performed).
+  #
+  # latest_message_kind is protocol-only, so trailing note/relay messages
+  # written after the interrupted close do not mask the mismatch.
+  local sdir="$1" sj="$sdir/session.json"
+  local latest_kind; latest_kind="$(latest_message_kind "$sdir")"
+  [[ "$latest_kind" == "decision" ]] || return 1
+  local latest_decision_file
+  latest_decision_file="$(ls "$sdir/messages" 2>/dev/null \
+    | grep -E '^[0-9]{6}-decision\.json$' \
+    | sort -n | tail -1)"
+  [[ -n "$latest_decision_file" ]] || return 1
+  local close_flag
+  close_flag="$(jq -r '.body.session_close // false' \
+    "$sdir/messages/$latest_decision_file" 2>/dev/null)"
+  [[ "$close_flag" == "true" ]] || return 1
+  local healed_at; healed_at="$(now_utc)"
+  jq --arg ts "$healed_at" \
+     '.status = "closed" | .status_self_repaired_at = $ts' \
+     "$sj" > "$sj.tmp"
+  mv "$sj.tmp" "$sj"
+  return 0
+}
+
 response_findings_all_deferred_in_decision() {
   # XAR-1A.2c.c: decision body comes from cmd_write's snapshot
   # (DEC-037). resp_findings is already an in-memory JSON string from
@@ -795,10 +869,21 @@ is_all_deferred_continue_decision_round() {
   jq -e '(.body.next_action // "") == "continue"' \
     "$sdir/messages/$decision_file" >/dev/null || return 1
 
-  local response_file; response_file="$(preceding_response_file_for_decision "$sdir" "$decision_file")"
-  [[ -n "$response_file" ]] || return 1
-
-  local resp_findings; resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$response_file")"
+  # PR #81 codex P2: in parallel_review a round's findings are the UNION
+  # across both reviewers' effective responses, so the loop-breaker
+  # counter must classify prior decisions against the same union the
+  # decision was validated with. Inspecting only the single immediately
+  # preceding response would let a clean second response mask the first
+  # response's deferred findings, skipping the round in the count and
+  # never forcing needs_user on the third repeat.
+  local resp_findings
+  if [[ "$(_session_dialogue_mode "$sdir/session.json")" == "parallel_review" ]]; then
+    resp_findings="$(_round_findings_union "$sdir" "${decision_file%%-*}")"
+  else
+    local response_file; response_file="$(preceding_response_file_for_decision "$sdir" "$decision_file")"
+    [[ -n "$response_file" ]] || return 1
+    resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$response_file")"
+  fi
   # XAR-1A.2c.c: response_findings_all_deferred_in_decision now expects
   # a JSON string. Read the persisted decision file (helper-owned,
   # under-lock) into the same shape. The `(.body // .)` filter in the
@@ -840,11 +925,75 @@ count_trailing_all_deferred_continue_decisions() {
   printf '%s\n' "$count"
 }
 
+_round_response_files() {
+  # Effective response files of one round, excluding superseded responses
+  # (a replacement supersedes its target, so the target drops out of the
+  # effective round set). The round is bounded by the latest request
+  # BELOW the optional upper id (default: unbounded → current round) and
+  # the upper id itself — passing a prior decision's id reconstructs THAT
+  # decision's round (PR #81 codex P2: the all-deferred loop counter must
+  # classify prior parallel rounds from the same union the decision was
+  # validated against).
+  local sdir="$1" upper_id="${2:-999999}"
+  local last_req_id="000000" f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    local id="${f%%-*}"
+    [[ "$id" < "$upper_id" ]] || continue
+    last_req_id="$id"
+  done < <(ls "$sdir/messages" 2>/dev/null | grep -E '^[0-9]{6}-request\.json$' | sort -n)
+  local superseded=" "
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    local sup; sup="$(jq -r '.body.supersedes // ""' "$sdir/messages/$f" 2>/dev/null)"
+    [[ -n "$sup" ]] && superseded="${superseded}${sup} "
+  done < <(ls "$sdir/messages" 2>/dev/null | grep -E '^[0-9]{6}-response\.json$')
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    local id="${f%%-*}"
+    [[ "$id" > "$last_req_id" && "$id" < "$upper_id" ]] || continue
+    [[ "$superseded" == *" $id "* ]] && continue
+    printf '%s\n' "$f"
+  done < <(ls "$sdir/messages" 2>/dev/null | grep -E '^[0-9]{6}-response\.json$' | sort -n)
+}
+
+_round_findings_union() {
+  # XAR-1A.7 parallel_review: the decision must dispose the union of
+  # findings across every effective response of the round, not just the
+  # latest one. finding_id collisions across the two reviewers are merged
+  # by id — with the skill's round-local F<N> naming, one disposition for
+  # an id covers both reviewers' findings under that id. Optional second
+  # arg bounds the round to a prior decision's window (see
+  # _round_response_files).
+  #
+  # Q-056 (G4 defense-in-depth): the write-time collision reject is the
+  # primary guard, but union/coverage must NOT be its single point of
+  # failure. If two effective responses of the round still carry the same
+  # finding_id for distinct findings (legacy data, manual edit, a guard
+  # bypass), silently de-duping would feed a false 1:1 disposition map to
+  # the decision audit. Detect the duplicate here and die instead — the
+  # decision write fails loudly rather than recording an ambiguous audit.
+  local sdir="$1" upper_id="${2:-999999}" union='[]' f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    local fl; fl="$(jq -c '.body.findings // []' "$sdir/messages/$f")"
+    union="$(jq -c --argjson add "$fl" '. + $add' <<<"$union")"
+  done < <(_round_response_files "$sdir" "$upper_id")
+  local _dups; _dups="$(jq -r '[.[] | (.finding_id // "") | select(length > 0)] | group_by(.) | map(select(length > 1)) | map(.[0]) | join(" ")' <<<"$union")"
+  if [[ -n "$_dups" ]]; then
+    die 4 "parallel_review round has duplicate finding_id across effective responses: $_dups. Each finding_id must be distinct across agents (Q-056) — disposition would be ambiguous."
+  fi
+  jq -c 'unique_by(.finding_id)' <<<"$union"
+}
+
 validate_sequencing() {
   # XAR-1A.2c.c: body input is cmd_write's JSON snapshot (DEC-037).
   # source_message_ids existence still resolves against $sdir/messages,
   # which is filesystem state outside operator-controlled inputs.
-  local kind="$1" sdir="$2" body_json="${3:-}"
+  #
+  # XAR-1A.7 (INV-0004-10): sequencing is dialogue_mode-dependent for
+  # response and decision — see the per-kind branches.
+  local kind="$1" sdir="$2" body_json="${3:-}" dmode="${4:-adversarial_dialogue}" sender="${5:-}"
   local latest; latest="$(latest_message_kind "$sdir")"
 
   # XAR-1A.6b (ADR-0004 INV-0004-6): supersedes-aware sequencing. When the
@@ -858,6 +1007,35 @@ validate_sequencing() {
   # to dispose remain relevant).
   if [[ "$kind" =~ ^(request|response|decision)$ ]] \
        && jq -e 'has("supersedes")' <<<"$body_json" >/dev/null; then
+    # Q-056 (PR #85 codex P2): a parallel_review response carrying
+    # `supersedes` returns from this branch before reaching the `response)`
+    # case, so the write-time peer-collision check would be skipped — a
+    # replacement could reuse the peer's finding_id and only fail later at
+    # the decision's audit-time invariant. Run the same collision check
+    # here for supersedes-replacement responses, EXCLUDING the superseded
+    # target (which this write replaces) but still comparing against the
+    # peer's effective response. adversarial_dialogue has one reviewer per
+    # round, so this is parallel-only.
+    if [[ "$kind" == "response" && "$dmode" == "parallel_review" ]]; then
+      local _sup_target_r; _sup_target_r="$(jq -r '.supersedes' <<<"$body_json")"
+      local _my_ids_r; _my_ids_r="$(jq -r '(.findings // []) | .[] | (.finding_id // "") | select(length > 0)' <<<"$body_json" | sort -u)"
+      if [[ -n "$_my_ids_r" ]]; then
+        local _rf2
+        while IFS= read -r _rf2; do
+          [[ -n "$_rf2" ]] || continue
+          [[ "${_rf2%%-*}" == "$_sup_target_r" ]] && continue  # skip the target we replace
+          local _rsender2; _rsender2="$(jq -r '.sender // ""' "$sdir/messages/$_rf2")"
+          [[ "$_rsender2" == "$sender" ]] && continue           # skip our own (non-target) — sequencing handles duplicate-self elsewhere
+          local _peer_ids2; _peer_ids2="$(jq -r '(.body.findings // []) | .[] | (.finding_id // "") | select(length > 0)' "$sdir/messages/$_rf2" | sort -u)"
+          if [[ -n "$_peer_ids2" ]]; then
+            local _clash2; _clash2="$(comm -12 <(printf '%s\n' "$_my_ids_r") <(printf '%s\n' "$_peer_ids2") | tr '\n' ' ')"
+            if [[ -n "${_clash2// /}" ]]; then
+              die 4 "finding_id collides with peer ($_rsender2) response in this round (supersedes replacement): ${_clash2% }. parallel_review disposes the round's finding_id union, so ids must be distinct across agents (peer used: $(printf '%s' "$_peer_ids2" | tr '\n' ' '))."
+            fi
+          fi
+        done < <(_round_response_files "$sdir")
+      fi
+    fi
     if [[ "$kind" == "decision" ]]; then
       # XAR-1A.6b PR review pass 2 F1: supersedes-aware decision must keep
       # the normal-path safety guards (coverage + all-deferred warning +
@@ -870,11 +1048,24 @@ validate_sequencing() {
       if [[ "$_new_close" == "true" && "$_new_next" != "close" ]]; then
         die 4 "decision (supersedes) session_close=true requires next_action=close"
       fi
-      local _last_resp_for_sup; _last_resp_for_sup="$(ls "$sdir/messages" 2>/dev/null \
-        | grep -E '^[0-9]{6}-response\.json$' \
-        | sort -n | tail -1)"
-      if [[ -n "$_last_resp_for_sup" ]]; then
-        local _resp_findings; _resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$_last_resp_for_sup")"
+      # PR #81 codex P2: the replacement decision must satisfy the same
+      # coverage source as a normal decision — in parallel_review that is
+      # the round-wide findings UNION, not just the latest response.
+      # Otherwise the user could write a full decision and supersede it
+      # with one disposing only the latest reviewer's findings, silently
+      # dropping the other reviewer's.
+      local _resp_findings=""
+      if [[ "$dmode" == "parallel_review" ]]; then
+        _resp_findings="$(_round_findings_union "$sdir")"
+      else
+        local _last_resp_for_sup; _last_resp_for_sup="$(ls "$sdir/messages" 2>/dev/null \
+          | grep -E '^[0-9]{6}-response\.json$' \
+          | sort -n | tail -1)"
+        if [[ -n "$_last_resp_for_sup" ]]; then
+          _resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$_last_resp_for_sup")"
+        fi
+      fi
+      if [[ -n "$_resp_findings" ]]; then
         local _fcount; _fcount="$(jq 'length' <<<"$_resp_findings")"
         if (( _fcount > 0 )); then
           local _resp_ids _dec_ids _missing
@@ -929,8 +1120,48 @@ validate_sequencing() {
       esac
       ;;
     response)
-      [[ "$latest" == "request" ]] \
-        || die 4 "response requires the latest message to be request (got: ${latest:-none})"
+      if [[ "$dmode" == "parallel_review" ]]; then
+        # XAR-1A.7 parallel_review: both agents respond to the same
+        # request, order free, one effective response per agent per
+        # round. A decision closes the round — late responses must wait
+        # for the next request.
+        case "$latest" in
+          request|response) ;;
+          *) die 4 "response requires an open round (latest: ${latest:-none}); write a request first" ;;
+        esac
+        # Q-056: finding_id collision reject (under the write lock, so the
+        # sibling round state is re-read atomically — G1). In
+        # parallel_review both agents respond to the same request, and the
+        # decision disposes the round's finding_id UNION; if two agents use
+        # the same finding_id for DIFFERENT findings, a single disposition
+        # is ambiguous and audit becomes false. Reject a response whose
+        # finding_ids collide with a sibling (peer) effective response's
+        # ids this round. The skill convention assigns distinct prefixes
+        # (initiator F.., reviewer G..) so the natural path never collides;
+        # this is the deterministic backstop. The reject message lists the
+        # peer's used ids so the author can renumber (G3).
+        local _my_ids; _my_ids="$(jq -r '(.findings // []) | .[] | (.finding_id // "") | select(length > 0)' <<<"$body_json" | sort -u)"
+        local rf
+        while IFS= read -r rf; do
+          [[ -n "$rf" ]] || continue
+          local rsender; rsender="$(jq -r '.sender // ""' "$sdir/messages/$rf")"
+          if [[ "$rsender" == "$sender" ]]; then
+            die 4 "response from $sender already exists in this round; use supersedes to replace it or wait for the next request"
+          fi
+          if [[ -n "$_my_ids" ]]; then
+            local _peer_ids; _peer_ids="$(jq -r '(.body.findings // []) | .[] | (.finding_id // "") | select(length > 0)' "$sdir/messages/$rf" | sort -u)"
+            if [[ -n "$_peer_ids" ]]; then
+              local _clash; _clash="$(comm -12 <(printf '%s\n' "$_my_ids") <(printf '%s\n' "$_peer_ids") | tr '\n' ' ')"
+              if [[ -n "${_clash// /}" ]]; then
+                die 4 "finding_id collides with peer ($rsender) response in this round: ${_clash% }. parallel_review disposes the round's finding_id union, so ids must be distinct across agents — use a distinct prefix (peer used: $(printf '%s' "$_peer_ids" | tr '\n' ' '))."
+              fi
+            fi
+          fi
+        done < <(_round_response_files "$sdir")
+      else
+        [[ "$latest" == "request" ]] \
+          || die 4 "response requires the latest message to be request (got: ${latest:-none})"
+      fi
       ;;
     note)
       # `note` is a supplemental artifact and does not advance the
@@ -985,13 +1216,22 @@ validate_sequencing() {
 
       case "$latest" in
         response)
-          # Finding coverage: if the latest response recorded findings, the
-          # decision must dispose every finding_id. Empty findings keeps an
-          # empty decisions array valid (used by /pingpong stop on clean reviews).
-          local last_response_file; last_response_file="$(ls "$sdir/messages" 2>/dev/null \
-            | grep -E '^[0-9]{6}-response\.json$' \
-            | sort -n | tail -1)"
-          local resp_findings; resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$last_response_file")"
+          # Finding coverage: the decision must dispose every finding_id
+          # the round produced. adversarial_dialogue reads the latest
+          # response (one reviewer per round); parallel_review reads the
+          # union across all effective responses of the round (XAR-1A.7 —
+          # disposing only one reviewer's findings would silently drop
+          # the other reviewer's). Empty findings keeps an empty
+          # decisions array valid (used by /pingpong stop on clean reviews).
+          local resp_findings
+          if [[ "$dmode" == "parallel_review" ]]; then
+            resp_findings="$(_round_findings_union "$sdir")"
+          else
+            local last_response_file; last_response_file="$(ls "$sdir/messages" 2>/dev/null \
+              | grep -E '^[0-9]{6}-response\.json$' \
+              | sort -n | tail -1)"
+            resp_findings="$(jq -c '.body.findings // []' "$sdir/messages/$last_response_file")"
+          fi
           local fcount; fcount="$(jq 'length' <<<"$resp_findings")"
           if (( fcount > 0 )); then
             local resp_ids dec_ids missing
@@ -1165,7 +1405,7 @@ _compute_available_note_ids() {
 # corresponds to a 5-tuple item in INV-0004-5; failing any one rejects the
 # write.
 validate_supersedes() {
-  local kind="$1" sender="$2" sdir="$3" body_json="$4"
+  local kind="$1" sender="$2" sdir="$3" body_json="$4" dmode="${5:-adversarial_dialogue}"
   case "$kind" in
     request|response|decision) ;;
     *)
@@ -1197,10 +1437,34 @@ validate_supersedes() {
   #     itself superseded by another message of the same kind. We compute
   #     by walking the message list for that kind, marking superseded ids,
   #     and asserting target is the maximum non-superseded id.
-  local kind_ids; kind_ids="$(ls "$sdir/messages" 2>/dev/null \
-    | grep -E "^[0-9]{6}-${kind}\.json$" \
-    | sed -E "s/-${kind}\.json$//" \
-    | sort)"
+  #
+  #     PR #81 codex P2: in parallel_review the two reviewers' responses
+  #     are siblings, not a sequence — the first responder must be able
+  #     to replace its OWN response while the round is still open, even
+  #     after the peer responded. So for parallel response supersedes the
+  #     "latest effective" scope narrows to the SENDER's responses
+  #     (check 3 already pinned target_sender == sender).
+  local kind_ids
+  if [[ "$kind" == "response" && "$dmode" == "parallel_review" ]]; then
+    local rid rfile
+    kind_ids=""
+    while IFS= read -r rid; do
+      [[ -n "$rid" ]] || continue
+      rfile="$sdir/messages/${rid}-response.json"
+      if [[ "$(jq -r '.sender' "$rfile")" == "$sender" ]]; then
+        kind_ids="${kind_ids}${rid}
+"
+      fi
+    done < <(ls "$sdir/messages" 2>/dev/null \
+      | grep -E '^[0-9]{6}-response\.json$' \
+      | sed -E 's/-response\.json$//' \
+      | sort)
+  else
+    kind_ids="$(ls "$sdir/messages" 2>/dev/null \
+      | grep -E "^[0-9]{6}-${kind}\.json$" \
+      | sed -E "s/-${kind}\.json$//" \
+      | sort)"
+  fi
   # collect supersedes targets among existing messages of this kind
   local superseded_ids="" mid mfile sup
   while IFS= read -r mid; do
@@ -1220,9 +1484,23 @@ validate_supersedes() {
   [[ "$latest_effective" == "$target_id" ]] \
     || die 4 "supersedes target $target_id is not latest effective of kind=$kind (latest effective: ${latest_effective:-none})"
   # (5) no downstream protocol consumer — no protocol message with id
-  #     greater than target_id (any kind in request/response/decision)
+  #     greater than target_id (any kind in request/response/decision).
+  #
+  #     PR #81 codex P2: in parallel_review the peer's sibling response
+  #     answers the same request and does NOT consume this sender's
+  #     response — only a decision (or a later request, which sequencing
+  #     forbids without a decision anyway) consumes responses. So for
+  #     parallel response supersedes the downstream scan skips sibling
+  #     responses; once the round's decision lands, replacement is
+  #     rejected here as before.
   local target_num=$((10#$target_id))
   local downstream=""
+  local -a _ds_patterns
+  if [[ "$kind" == "response" && "$dmode" == "parallel_review" ]]; then
+    _ds_patterns=(-name "*-request.json" -o -name "*-decision.json")
+  else
+    _ds_patterns=(-name "*-request.json" -o -name "*-response.json" -o -name "*-decision.json")
+  fi
   while IFS= read -r mfile; do
     [[ -n "$mfile" ]] || continue
     local mbase; mbase="$(basename "$mfile")"
@@ -1231,7 +1509,7 @@ validate_supersedes() {
     if (( mid_num > target_num )); then
       downstream="${downstream}${mbase} "
     fi
-  done < <(find "$sdir/messages" -maxdepth 1 -type f \( -name "*-request.json" -o -name "*-response.json" -o -name "*-decision.json" \) | sort)
+  done < <(find "$sdir/messages" -maxdepth 1 -type f \( "${_ds_patterns[@]}" \) | sort)
   [[ -z "$downstream" ]] \
     || die 4 "supersedes target $target_id already has downstream protocol consumer(s): ${downstream% }"
 }
@@ -1244,7 +1522,41 @@ validate_supersedes() {
 # general continue extension is Q-054 follow-up, not part of this slice.
 validate_prior_decision_context_equality() {
   local sdir="$1" body_json="$2"
-  jq -e '(has("prior_decision_context") | not)' <<<"$body_json" >/dev/null && return 0
+  if jq -e '(has("prior_decision_context") | not)' <<<"$body_json" >/dev/null; then
+    # XAR-1A.6c (ADR-0004 INV-0004-9 full acceptance): a request that
+    # resumes after a needs_user decision must carry the deterministic
+    # prior_decision_context — field absence is now rejected, not
+    # accepted. XAR-1A.6b shipped validate-if-present only; this is the
+    # staged flip. Non-resume requests (no prior decision, or latest
+    # decision is continue) legitimately omit the field.
+    local last_dec; last_dec="$(ls "$sdir/messages" 2>/dev/null \
+      | grep -E '^[0-9]{6}-decision\.json$' \
+      | sort -n | tail -1 || true)"
+    if [[ -n "$last_dec" ]]; then
+      local last_req; last_req="$(ls "$sdir/messages" 2>/dev/null \
+        | grep -E '^[0-9]{6}-request\.json$' \
+        | sort -n | tail -1 || true)"
+      # The resume is the FIRST request after the needs_user decision;
+      # once a newer request exists past the decision, later requests are
+      # ordinary continue turns. One exception: a supersedes-replacement
+      # of that resume request is itself the (new effective) resume —
+      # accepting it without pdc would silently drop the context from
+      # the effective request, defeating the INV-0004-9 guarantee.
+      local replaces_post_decision_request="false"
+      if [[ -n "$last_req" && "${last_req%%-*}" > "${last_dec%%-*}" ]] \
+         && jq -e --arg t "${last_req%%-*}" '.supersedes == $t' <<<"$body_json" >/dev/null 2>&1; then
+        replaces_post_decision_request="true"
+      fi
+      if [[ -z "$last_req" || "${last_req%%-*}" < "${last_dec%%-*}" || "$replaces_post_decision_request" == "true" ]]; then
+        local last_dec_next
+        last_dec_next="$(jq -r '.body.next_action // ""' "$sdir/messages/$last_dec")"
+        if [[ "$last_dec_next" == "needs_user" ]]; then
+          die 4 "request: prior_decision_context is required when resuming after a needs_user decision (XAR-1A.6c enforcement flip; run 'compose-context --session <sid> --from-decision ${last_dec%%-*}' and embed its output verbatim)"
+        fi
+      fi
+    fi
+    return 0
+  fi
   # find latest decision file
   local last_decision_file; last_decision_file="$(ls "$sdir/messages" 2>/dev/null \
     | grep -E '^[0-9]{6}-decision\.json$' \
@@ -1274,12 +1586,17 @@ validate_prior_decision_context_equality() {
 # --- Subcommands ------------------------------------------------------------
 
 cmd_init() {
-  local initiator="" topic="" repo="" emit_json="false"
+  # XAR-1A.7 (INV-0004-10): --dialogue-mode selects the session topology.
+  # Default is parallel_review (Q-053 — the user's recorded preference,
+  # effective now that the behavior lands with this slice). The mode
+  # switch is this named flag — no implicit/keyword inference (R2-F7).
+  local initiator="" topic="" repo="" emit_json="false" dialogue_mode="parallel_review"
   while (( $# )); do
     case "$1" in
       --initiator) initiator="$2"; shift 2 ;;
       --topic)     topic="$2";     shift 2 ;;
       --repo)      repo="$2";      shift 2 ;;
+      --dialogue-mode) dialogue_mode="$2"; shift 2 ;;
       --json)      emit_json="true"; shift ;;
       *) die 3 "init: unknown argument: $1" ;;
     esac
@@ -1291,6 +1608,10 @@ cmd_init() {
     *) die 3 "init: --initiator must be codex|claude" ;;
   esac
   [[ -n "$topic" ]] || die 3 "init: --topic required"
+  case "$dialogue_mode" in
+    adversarial_dialogue|parallel_review) ;;
+    *) die 3 "init: --dialogue-mode must be adversarial_dialogue|parallel_review (got: $dialogue_mode)" ;;
+  esac
 
   # Run the redaction scanner on init metadata before creating any session
   # artifact. /pingpong start passes user text as --topic; without this,
@@ -1331,6 +1652,11 @@ cmd_init() {
     repo_json="$(jq -n --arg path "$repo" --arg head "$head_sha" '{path: $path, head_sha: ($head | select(length > 0)) }')"
   fi
 
+  # XAR-1A.7 (B) collision-resolving rename: the old `mode` field carried
+  # DEC-006 peer availability semantics — new sessions write it as
+  # `peer_availability` and the dialogue topology lives in the new
+  # `dialogue_mode` field. Old sessions are lazily migrated on their next
+  # write (cmd_write lock window).
   jq -n \
     --arg schema "$SCHEMA_VERSION" \
     --arg sid "$sid" \
@@ -1338,18 +1664,20 @@ cmd_init() {
     --arg topic "$topic" \
     --arg initiator "$initiator" \
     --arg reviewer "$reviewer" \
+    --arg dmode "$dialogue_mode" \
     --argjson repo "$repo_json" \
-    '{schema_version: $schema, session_id: $sid, created_at: $ts, status: "open", topic: $topic, initiator_agent: $initiator, reviewer_agent: $reviewer, mode: "peer-required", repo: $repo}' \
+    '{schema_version: $schema, session_id: $sid, created_at: $ts, status: "open", topic: $topic, initiator_agent: $initiator, reviewer_agent: $reviewer, peer_availability: "peer-required", dialogue_mode: $dmode, repo: $repo}' \
     > "$sdir/session.json.tmp"
   mv "$sdir/session.json.tmp" "$sdir/session.json"
 
   if [[ "$emit_json" == "true" ]]; then
-    jq -n --arg sid "$sid" --arg sdir "$sdir" \
-      '{schema_version: 1, kind: "agent_dialog_init", session_id: $sid, session_dir: $sdir}'
+    jq -n --arg sid "$sid" --arg sdir "$sdir" --arg dmode "$dialogue_mode" \
+      '{schema_version: 1, kind: "agent_dialog_init", session_id: $sid, session_dir: $sdir, dialogue_mode: $dmode}'
   else
     printf 'Session: %s\n' "$sid"
     printf 'Dir:     %s\n' "$sdir"
     printf 'Roles:   initiator=%s reviewer=%s\n' "$initiator" "$reviewer"
+    printf 'Mode:    %s\n' "$dialogue_mode"
     printf 'Join:    (in the other agent) /pingpong join %s\n' "$sid"
   fi
 }
@@ -1413,7 +1741,29 @@ cmd_write() {
   reviewer="$(jq -r '.reviewer_agent' "$sj")"
   [[ "$status" == "open" ]] || die 4 "write: session $session status is $status"
 
-  validate_role "$kind" "$sender" "$initiator" "$reviewer" "$body_json"
+  # XAR-1A.7 (INV-0004-10): dialogue topology mode drives role and
+  # sequencing rules below. Old sessions without the field default to
+  # adversarial_dialogue (see _session_dialogue_mode).
+  local dmode; dmode="$(_session_dialogue_mode "$sj")"
+
+  validate_role "$kind" "$sender" "$initiator" "$reviewer" "$body_json" "$dmode"
+
+  # XAR-1A.6c (ADR-0004 INV-0004-4 full acceptance): delegation provenance
+  # is now REQUIRED, not validate-if-present. Agent-sender protocol bodies
+  # that the delegation contract composes (request, decision) must carry a
+  # non-empty original_user_instructions. user-sender decisions are the
+  # operator's own words — the body itself is the provenance, so no field
+  # is required there. note/relay are passthrough kinds (INV-0004-3) and
+  # never carry the field. Shape (string + non-empty when present) is
+  # still validated for every kind in validate_body.
+  case "$kind" in
+    request|decision)
+      if [[ "$sender" == "codex" || "$sender" == "claude" ]]; then
+        jq -e '(.original_user_instructions | type == "string") and (.original_user_instructions | length > 0)' <<<"$body_json" >/dev/null \
+          || die 3 "$kind: original_user_instructions is required for agent-composed protocol bodies (XAR-1A.6c enforcement flip; ADR-0004 INV-0004-4)"
+      fi
+      ;;
+  esac
 
   acquire_lock "$sdir"
   # Re-read status under lock to close the abandon/close race: cmd_abandon
@@ -1424,13 +1774,30 @@ cmd_write() {
   # status-only transition).
   local status_locked; status_locked="$(jq -r '.status' "$sj")"
   [[ "$status_locked" == "open" ]] || die 4 "write: session $session is $status_locked (after lock)"
+  # XAR-1A.2c close partial-failure self-repair: an interrupted terminal
+  # close (decision persisted, status flip lost to a crash) leaves
+  # status=open with a session_close=true latest decision. Heal the
+  # status under the lock we already hold, then reject this write the
+  # same way a normally-closed session would.
+  if _heal_interrupted_terminal_close "$sdir"; then
+    die 4 "write: session $session is closed (status self-repaired: latest decision carries session_close=true but an interrupted close left status=open)"
+  fi
+  # XAR-1A.7 lazy schema migration under the write lock: pre-XAR-1A.7
+  # sessions carry `mode: "peer-required"` (DEC-006 peer availability
+  # semantics). Rename it to `peer_availability` once; dialogue_mode is
+  # deliberately NOT added — the absent-field default in
+  # _session_dialogue_mode keeps old sessions adversarial_dialogue.
+  if jq -e 'has("mode") and (has("peer_availability") | not)' "$sj" >/dev/null; then
+    jq '.peer_availability = .mode | del(.mode)' "$sj" > "$sj.tmp"
+    mv "$sj.tmp" "$sj"
+  fi
   # Re-read latest under lock and validate sequencing (decision coverage
-  # needs the body to compare against the latest response's findings).
-  validate_sequencing "$kind" "$sdir" "$body_json"
+  # needs the body to compare against the round's response findings).
+  validate_sequencing "$kind" "$sdir" "$body_json" "$dmode" "$sender"
 
   # XAR-1A.6b (ADR-0004 INV-0004-5/-6/-7): supersedes 5-check under the
   # same lock. validate-if-present — no-op when body has no supersedes.
-  validate_supersedes "$kind" "$sender" "$sdir" "$body_json"
+  validate_supersedes "$kind" "$sender" "$sdir" "$body_json" "$dmode"
 
   # XAR-1A.6b (ADR-0004 INV-0004-9): needs_user resume helper-recomputed
   # equality. validate-if-present — only fires when body has
@@ -1899,6 +2266,15 @@ cmd_abandon() {
       ;;
   esac
 
+  # XAR-1A.2c close partial-failure self-repair: same mismatch as the
+  # cmd_write call site — a session whose latest protocol message is a
+  # terminal close decision must not be re-classified as abandoned just
+  # because the status flip was lost to a crash. Heal to closed, then
+  # reject like the normal closed path.
+  if _heal_interrupted_terminal_close "$sdir"; then
+    die 4 "abandon: session $session is closed (status self-repaired from interrupted terminal close); closed sessions cannot be re-abandoned"
+  fi
+
   # Orphan-only restriction (DEC-026; codex review rounds 3, 4, 7): abandon
   # is for sessions that have NOT received the next reviewer response yet —
   # init-only, request-only first round, or a multi-round session sitting
@@ -2199,6 +2575,292 @@ cmd_cleanup() {
   fi
 }
 
+# --- Readiness-assist (XAR-1Ba.0) -------------------------------------------
+#
+# Deterministic "whose turn is it" projection + foreground poller. Both are
+# READ-ONLY: they never mutate session state, never take the write lock, and
+# never author message content. Turn detection is computed from the latest
+# protocol message (kind + session roles), NOT from an inbox cursor or lease
+# (DEC-011's cursor rejection stays intact). A stale answer is harmless by
+# design — the worst case is a notification for a turn that just changed,
+# and actual write correctness is still enforced by cmd_write's under-lock
+# sequencing validation. This is what makes the poller safe to run from
+# wake-up/scheduled contexts (AGENTS.policy.md: poll + report only).
+
+_whose_turn_json() {
+  # Emits a compact JSON object describing the next protocol actor for a
+  # session, or returns non-zero with a message on stderr for hard errors
+  # (missing session). Terminal sessions are NOT errors — they emit
+  # next_actor=none so pollers can distinguish "ended" from "broken".
+  local session="$1"
+  local sdir="$SESSIONS_DIR/$session"
+  [[ -d "$sdir" ]] || { echo "whose-turn: session not found: $session" >&2; return 3; }
+  local sj="$sdir/session.json"
+  [[ -f "$sj" ]] || { echo "whose-turn: session.json missing in $sdir" >&2; return 3; }
+
+  local status initiator reviewer
+  status="$(jq -r '.status' "$sj")"
+  initiator="$(jq -r '.initiator_agent' "$sj")"
+  reviewer="$(jq -r '.reviewer_agent' "$sj")"
+
+  local latest_file latest_kind="" latest_id="" latest_sender="" latest_next_action=""
+  latest_file="$(ls "$sdir/messages" 2>/dev/null \
+    | grep -E '^[0-9]{6}-(request|response|decision)\.json$' \
+    | sort -n | tail -1 || true)"
+  if [[ -n "$latest_file" ]]; then
+    latest_id="${latest_file%%-*}"
+    latest_kind="${latest_file#*-}"; latest_kind="${latest_kind%.json}"
+    latest_sender="$(jq -r '.sender // ""' "$sdir/messages/$latest_file")"
+    if [[ "$latest_kind" == "decision" ]]; then
+      latest_next_action="$(jq -r '.body.next_action // ""' "$sdir/messages/$latest_file")"
+    fi
+  fi
+
+  # next_actors is an ARRAY: adversarial_dialogue always yields zero or
+  # one entry, but parallel_review rounds can have BOTH agents pending a
+  # response at once, so the schema is plural from day one.
+  local dmode; dmode="$(_session_dialogue_mode "$sj")"
+  # terminal: no further protocol turns will ever occur. True for
+  # closed/abandoned status AND for the interrupted-terminal-close state
+  # (latest decision session_close=true while a crash left status=open).
+  local next_actors='[]' next_kind="none" waiting_on_user="false" terminal="false"
+  [[ "$status" == "open" ]] || terminal="true"
+  if [[ "$status" == "open" ]]; then
+    case "$latest_kind" in
+      "")        next_actors="$(jq -cn --arg a "$initiator" '[$a]')"; next_kind="request" ;;
+      request|response)
+        if [[ "$dmode" == "parallel_review" ]]; then
+          # XAR-1A.7 parallel_review: every session agent that has not
+          # yet written its effective response this round is pending.
+          # When both responses are in, the protocol waits on the USER's
+          # decision (Q-052) — no agent owes a protocol message, but a
+          # transcribing chat can act once the user supplies dispositions.
+          local pending; pending='[]'
+          local responded=" " rf rsender
+          while IFS= read -r rf; do
+            [[ -n "$rf" ]] || continue
+            rsender="$(jq -r '.sender // ""' "$sdir/messages/$rf")"
+            responded="${responded}${rsender} "
+          done < <(_round_response_files "$sdir")
+          local a
+          for a in "$initiator" "$reviewer"; do
+            [[ "$responded" == *" $a "* ]] && continue
+            pending="$(jq -c --arg a "$a" '. + [$a]' <<<"$pending")"
+          done
+          if [[ "$pending" != "[]" ]]; then
+            next_actors="$pending"; next_kind="response"
+          else
+            next_kind="decision"; waiting_on_user="true"
+          fi
+        else
+          if [[ "$latest_kind" == "request" ]]; then
+            next_actors="$(jq -cn --arg a "$reviewer" '[$a]')"; next_kind="response"
+          else
+            next_actors="$(jq -cn --arg a "$initiator" '[$a]')"; next_kind="decision"
+          fi
+        fi
+        ;;
+      decision)
+        case "$latest_next_action" in
+          continue)
+            # Next protocol step is the initiator's next request, but the
+            # delegation contract needs fresh user instructions first.
+            next_actors="$(jq -cn --arg a "$initiator" '[$a]')"; next_kind="request"; waiting_on_user="true" ;;
+          needs_user)
+            next_actors="$(jq -cn --arg a "$initiator" '[$a]')"; next_kind="request"; waiting_on_user="true" ;;
+          close)
+            # PR #82 codex P2: distinguish close-intent from an
+            # interrupted terminal close. close-intent
+            # (session_close=false) waits on the operator's explicit
+            # /pingpong stop. session_close=true with status still open
+            # is the crash window the next WRITE self-repairs — this
+            # read-only projection must not mutate, but it must report
+            # the session as terminal so pollers stop waiting on it.
+            local _close_flag
+            _close_flag="$(jq -r '.body.session_close // false' "$sdir/messages/$latest_file" 2>/dev/null)"
+            if [[ "$_close_flag" == "true" ]]; then
+              terminal="true"; next_kind="none"
+            else
+              next_kind="none"; waiting_on_user="true"
+            fi ;;
+          *)
+            next_kind="none" ;;
+        esac
+        ;;
+    esac
+  fi
+
+  jq -n \
+    --arg sid "$session" \
+    --arg status "$status" \
+    --arg dmode "$dmode" \
+    --arg lid "$latest_id" \
+    --arg lkind "$latest_kind" \
+    --arg lsender "$latest_sender" \
+    --arg lnext "$latest_next_action" \
+    --argjson next_actors "$next_actors" \
+    --arg next_kind "$next_kind" \
+    --argjson waiting "$waiting_on_user" \
+    --argjson terminal "$terminal" \
+    '{schema_version: 1, kind: "agent_dialog_whose_turn", session_id: $sid,
+      status: $status, dialogue_mode: $dmode, terminal: $terminal,
+      latest_protocol: (if $lid == "" then null else
+        ({message_id: $lid, kind: $lkind, sender: $lsender}
+         + (if $lnext == "" then {} else {next_action: $lnext} end)) end),
+      next_actors: $next_actors,
+      next_actor: (if ($next_actors | length) == 1 then $next_actors[0] else (if ($next_actors | length) == 0 then "none" else "multiple" end) end),
+      next_kind: $next_kind,
+      waiting_on_user: $waiting}'
+}
+
+cmd_whose_turn() {
+  local session="" emit_json="false"
+  while (( $# )); do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      --json)    emit_json="true"; shift ;;
+      *) die 3 "whose-turn: unknown argument: $1" ;;
+    esac
+  done
+  [[ -n "$session" ]] || die 3 "whose-turn: --session required"
+  validate_session_id "$session"
+
+  local obs rc=0
+  obs="$(_whose_turn_json "$session")" || rc=$?
+  (( rc == 0 )) || exit "$rc"
+
+  if [[ "$emit_json" == "true" ]]; then
+    printf '%s\n' "$obs"
+  else
+    local actor kind_v waiting status terminal_flag
+    actor="$(jq -r '.next_actor' <<<"$obs")"
+    kind_v="$(jq -r '.next_kind' <<<"$obs")"
+    waiting="$(jq -r '.waiting_on_user' <<<"$obs")"
+    status="$(jq -r '.status' <<<"$obs")"
+    terminal_flag="$(jq -r '.terminal' <<<"$obs")"
+    if [[ "$terminal_flag" == "true" ]]; then
+      printf 'Turn: none (session terminal; status: %s)\n' "$status"
+    elif [[ "$actor" == "none" ]]; then
+      printf 'Turn: none (session status: %s)\n' "$status"
+    else
+      printf 'Turn: %s (next: %s)%s\n' "$actor" "$kind_v" \
+        "$([[ "$waiting" == "true" ]] && printf ' — waiting on user input' || true)"
+    fi
+  fi
+}
+
+cmd_watch() {
+  # Foreground readiness poller. Re-computes whose-turn every --interval
+  # seconds and exits as soon as the watched agent owns the next protocol
+  # turn. Exit codes follow the codex-loop polling shape so interactive
+  # turns (or a poll-only ScheduleWakeup re-run) can branch on them:
+  #   0  ready — it is --agent's turn now (details on stdout)
+  #   2  timeout — turn did not arrive within --timeout
+  #   4  terminal — session closed/abandoned (no further turns)
+  #   3  usage / session not found
+  # No daemonization, no background loop: callers re-run this foreground
+  # command per wait cycle, exactly like wait-codex-review.sh.
+  local session="" agent="" interval=10 timeout=600 notify="" emit_json="false"
+  while (( $# )); do
+    case "$1" in
+      --session)  session="$2";  shift 2 ;;
+      --agent)    agent="$2";    shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      --timeout)  timeout="$2";  shift 2 ;;
+      --notify)   notify="$2";   shift 2 ;;
+      --json)     emit_json="true"; shift ;;
+      *) die 3 "watch: unknown argument: $1" ;;
+    esac
+  done
+  [[ -n "$session" ]] || die 3 "watch: --session required"
+  validate_session_id "$session"
+  case "$agent" in
+    codex|claude) ;;
+    *) die 3 "watch: --agent must be codex|claude" ;;
+  esac
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] || die 3 "watch: --interval must be a positive integer"
+  [[ "$timeout"  =~ ^[1-9][0-9]*$ ]] || die 3 "watch: --timeout must be a positive integer"
+  case "$notify" in
+    ""|desktop) ;;
+    *) die 3 "watch: --notify supports only: desktop" ;;
+  esac
+
+  local waited=0 polls=0
+  while true; do
+    local obs rc=0
+    obs="$(_whose_turn_json "$session")" || rc=$?
+    (( rc == 0 )) || exit "$rc"
+    polls=$((polls + 1))
+
+    local status kind_v waiting agent_ready terminal_flag
+    status="$(jq -r '.status' <<<"$obs")"
+    kind_v="$(jq -r '.next_kind' <<<"$obs")"
+    waiting="$(jq -r '.waiting_on_user' <<<"$obs")"
+    agent_ready="$(jq -r --arg a "$agent" '.next_actors | index($a) != null' <<<"$obs")"
+    terminal_flag="$(jq -r '.terminal' <<<"$obs")"
+
+    # PR #82 codex P2: .terminal covers closed/abandoned status AND the
+    # interrupted-terminal-close state (session_close=true decision with
+    # status stuck open) — pollers must stop waiting either way.
+    if [[ "$terminal_flag" == "true" ]]; then
+      # PR #82 codex P2: machine callers need the observation on
+      # non-ready exits too — emit the JSON before the exit code.
+      if [[ "$emit_json" == "true" ]]; then
+        jq -n --arg sid "$session" --arg agent "$agent" --arg status "$status" \
+          --argjson polls "$polls" \
+          '{schema_version: 1, kind: "agent_dialog_watch", session_id: $sid,
+            agent: $agent, ready: false, result: "terminal",
+            session_status: $status, polls: $polls}'
+      fi
+      echo "watch: session $session is terminal (status: $status) — no further turns" >&2
+      exit 4
+    fi
+
+    if [[ "$agent_ready" == "true" ]]; then
+      if [[ "$notify" == "desktop" ]] && command -v osascript >/dev/null 2>&1; then
+        # Best-effort notification; readiness signaling itself is the
+        # stdout line + exit code, so a notification failure is non-fatal.
+        osascript -e "display notification \"pingpong: ${agent} turn (${kind_v}) — session ${session}\" with title \"agent-dialog watch\"" \
+          >/dev/null 2>&1 || true
+      fi
+      if [[ "$emit_json" == "true" ]]; then
+        jq -n --arg sid "$session" --arg agent "$agent" --arg next_kind "$kind_v" \
+          --argjson waiting "$waiting" --argjson polls "$polls" \
+          '{schema_version: 1, kind: "agent_dialog_watch", session_id: $sid,
+            agent: $agent, ready: true, next_kind: $next_kind,
+            waiting_on_user: $waiting, polls: $polls}'
+      else
+        printf 'READY: %s turn (next: %s) in session %s%s\n' "$agent" "$kind_v" "$session" \
+          "$([[ "$waiting" == "true" ]] && printf ' — waiting on user input' || true)"
+      fi
+      return 0
+    fi
+
+    if (( waited >= timeout )); then
+      local current_turn
+      current_turn="$(jq -r '.next_actors | join(",") | if . == "" then "none" else . end' <<<"$obs")"
+      if [[ "$emit_json" == "true" ]]; then
+        jq -n --arg sid "$session" --arg agent "$agent" --arg turn "$current_turn" \
+          --arg next_kind "$kind_v" --argjson waiting "$waiting" --argjson polls "$polls" \
+          --argjson waited "$waited" \
+          '{schema_version: 1, kind: "agent_dialog_watch", session_id: $sid,
+            agent: $agent, ready: false, result: "timeout",
+            current_turn: $turn, next_kind: $next_kind,
+            waiting_on_user: $waiting, waited_seconds: $waited, polls: $polls}'
+      fi
+      echo "watch: timeout after ${waited}s — current turn: $current_turn (next: $kind_v)" >&2
+      exit 2
+    fi
+    # PR #82 codex P3: never sleep past the deadline — an interval larger
+    # than the remaining budget would block beyond the advertised
+    # timeout (and could even report ready after it elapsed).
+    local remaining=$((timeout - waited))
+    local nap=$(( interval < remaining ? interval : remaining ))
+    sleep "$nap"
+    waited=$((waited + nap))
+  done
+}
+
 # --- Main -------------------------------------------------------------------
 
 main() {
@@ -2220,6 +2882,8 @@ main() {
     abandon)    cmd_abandon "$@" ;;
     compose-context) cmd_compose_context "$@" ;;
     cleanup)    cmd_cleanup "$@" ;;
+    whose-turn) cmd_whose_turn "$@" ;;
+    watch)      cmd_watch "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 3 ;;
   esac

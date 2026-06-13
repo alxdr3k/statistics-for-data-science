@@ -525,29 +525,34 @@ while :; do
       and (($pass_pattern | length) > 0)
       and (((.body // "") | test($pass_pattern; "i")))
       and (((.state // "") | (. != "CHANGES_REQUESTED" and . != "DISMISSED")));
-    # When the author is known, dedup self review-requests against either the
-    # current configured body OR any legacy variant that starts with
-    # "@codex review" — that legacy prefix matters only because earlier
-    # versions of this script defaulted to single-line "@codex review" and
-    # in-place upgrades must not reclassify those self-comments as feedback.
-    # When the author is unknown (gh api user failed), the legacy prefix is
-    # UNSAFE because a third-party actionable comment like
-    # "@codex review please fix flaky test" would be silently dropped. So
-    # fall back to exact body match only in the empty-author branch.
-    def is_self_review_request:
-      ((.body // "") == $request_body)
-      or (((.body // "") | startswith("@codex review")));
+    # Exclude everything authored by the loop actor ($author). The loop never
+    # treats its own comments as actionable feedback to act on — not the
+    # review-request comment, not inline-reply acknowledgements of codex
+    # comments ("Fixed in <sha>"), not progress notes. Earlier this only
+    # dropped self review-requests (exact body / "@codex review" prefix), so a
+    # self-authored reply that landed after the baseline was misclassified as
+    # new feedback and forced a premature exit 1 — review_comments had no
+    # author filter at all. When the author is known, drop every self-authored
+    # item by login across all three sources. When the author is unknown
+    # (gh api user failed), we cannot identify self by login, so fall back to
+    # excluding only the exact review-request body — a third-party actionable
+    # comment like "@codex review please fix flaky test" must still surface in
+    # that degraded case (issue_comments only; reviews/review_comments have no
+    # request-body equivalent and surface as-is).
     ($ic | [.[] | select(.created_at > $base) | select(
       if (($author | length) > 0) then
-        (.user.login != $author) or (is_self_review_request | not)
+        (.user.login != $author)
       else
         .body != $request_body
       end
     ) | select(is_pass_comment | not)
       | {kind:"issue_comment", at:.created_at, login:.user.login, body:.body, state:""}])
     + ($rv | [.[] | select((.submitted_at // "") > $base) | select(is_pass_comment | not)
+                  | select((($author | length) == 0) or (.user.login != $author))
                   | {kind:"review", at:.submitted_at, login:.user.login, body:(.body // ""), state:(.state // "")}])
-    + ($rc | [.[] | select(.created_at > $base) | {kind:"review_comment", at:.created_at, login:.user.login, path:.path, line:(.line // .original_line), body:.body, state:""}])
+    + ($rc | [.[] | select(.created_at > $base)
+                  | select((($author | length) == 0) or (.user.login != $author))
+                  | {kind:"review_comment", at:.created_at, login:.user.login, path:.path, line:(.line // .original_line), body:.body, state:""}])
     | sort_by(.at)')
 
   count=$(printf '%s' "$new_items" | jq 'length')

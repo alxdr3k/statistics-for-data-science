@@ -242,7 +242,14 @@ Sync boilerplate-owned policy files.
 EOF
     pr_url="$(cd "$wt" && gh pr create --base "$base" --head "$branch" --title "$PR_TITLE" --body-file "$pr_body")"
     rm -f "$pr_body"
-    (cd "$wt" && gh pr merge "$pr_url" --squash --delete-branch)
+    # Merge from outside any git repo: gh resolves the repo from the PR URL,
+    # so --delete-branch only deletes the remote branch. Inside $wt, gh would
+    # attempt local cleanup (checkout "$base" + delete the local branch),
+    # which fails whenever the repo's primary checkout has "$base" checked
+    # out ("fatal: '<base>' is already used by worktree ...") — the remote
+    # merge has already succeeded at that point, but set -e aborts the rest
+    # of the sync run and leaves the temp worktree + local branch behind.
+    (cd / && gh pr merge "$pr_url" --squash --delete-branch)
     echo "$name squash-merged $(git -C "$wt" rev-parse --short HEAD) -> $base ($pr_url)"
   fi
 
@@ -256,7 +263,9 @@ with_targets() {
   local targets="$1" fn="$2"
   local input="$targets"
   [[ "$targets" == "-" ]] && input="/dev/stdin"
-  [[ "$targets" != "-" && ! -f "$targets" ]] && die "target file not found: $targets"
+  # -p admits process substitution (`apply <(printf ...)`), which surfaces
+  # as a pipe at /dev/fd/N and fails a plain -f regular-file test.
+  [[ "$targets" != "-" && ! -f "$targets" && ! -p "$targets" ]] && die "target file not found: $targets"
   while IFS=$'\t' read -r name repo base profile rest; do
     [[ -n "${name:-}" && "$name" != \#* ]] || continue
     [[ -n "${repo:-}" && -n "${base:-}" ]] || die "bad target row for $name"
@@ -267,7 +276,22 @@ with_targets() {
 
 sync_targets() {
   local targets="${1:-$DEFAULT_TARGETS}"
-  [[ -f "$targets" ]] || die "target file not found: $targets"
+  # sync reads the target list twice (plan pass, then apply pass), so
+  # pipe-shaped inputs (process substitution, stdin) cannot be passed through
+  # directly — the plan pass would drain the pipe and apply would see EOF.
+  # Materialize them to a temp file consumed by both passes instead.
+  if [[ "$targets" == "-" || -p "$targets" ]]; then
+    local materialized
+    materialized="$(mktemp)"
+    if [[ "$targets" == "-" ]]; then
+      cat > "$materialized"
+    else
+      cat "$targets" > "$materialized"
+    fi
+    targets="$materialized"
+  elif [[ ! -f "$targets" ]]; then
+    die "target file not found: $targets"
+  fi
 
   # Print plan (informational) then always run apply.
   # plan_one uses the local checkout; apply_one fetches origin/$base and is the
@@ -277,6 +301,8 @@ sync_targets() {
   # correctness.
   with_targets "$targets" plan_one
   with_targets "$targets" apply_one
+  [[ -n "${materialized:-}" ]] && rm -f "$materialized"
+  return 0
 }
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
