@@ -512,6 +512,7 @@ while :; do
   new_items=$(jq -n --arg base "$baseline" --arg request_body "$review_request_body" \
     --arg author "$request_author" \
     --arg pass_actor "$pass_actor" --arg pass_pattern "$pass_comment_pattern" \
+    --arg reviewed_head "$reviewed_head_sha" \
     --argjson ic "$ic" --argjson rv "$rv" --argjson rc "$rc" '
     # Pass-comment recognition. Pattern is a case-insensitive regex; default
     # rejects opposite-meaning wording like "I did find any major issues"
@@ -525,6 +526,24 @@ while :; do
       and (($pass_pattern | length) > 0)
       and (((.body // "") | test($pass_pattern; "i")))
       and (((.state // "") | (. != "CHANGES_REQUESTED" and . != "DISMISSED")));
+    # Stale-review guard. A review/review_comment carries the commit SHA codex
+    # actually evaluated (.commit_id). Codex review latency (~minutes) can exceed
+    # our fix-and-push latency, so a review of an already-superseded commit can
+    # land AFTER the new baseline and would otherwise be classified as fresh
+    # actionable feedback — re-surfacing issues already fixed. Drop a codex item
+    # whose commit_id is present and differs from the head we are waiting on
+    # ($reviewed_head). Scope: ONLY $pass_actor-authored items. A human reviewer
+    # may start a pending review on an older commit and submit it after a newer
+    # push (GitHub records it against the older commit_id); that is genuine
+    # actionable feedback and must stay visible, so non-codex items are never
+    # stale-dropped. Fail open for codex too: when $reviewed_head is unknown or
+    # the item carries no commit_id, keep it (baseline-pin only). issue_comments
+    # have no commit association, so the guard cannot apply to them.
+    def fresh_commit:
+      (.user.login != $pass_actor)
+      or ($reviewed_head | length) == 0
+      or ((.commit_id // "") | length) == 0
+      or (.commit_id == $reviewed_head);
     # Exclude everything authored by the loop actor ($author). The loop never
     # treats its own comments as actionable feedback to act on — not the
     # review-request comment, not inline-reply acknowledgements of codex
@@ -549,11 +568,32 @@ while :; do
       | {kind:"issue_comment", at:.created_at, login:.user.login, body:.body, state:""}])
     + ($rv | [.[] | select((.submitted_at // "") > $base) | select(is_pass_comment | not)
                   | select((($author | length) == 0) or (.user.login != $author))
+                  | select(fresh_commit)
                   | {kind:"review", at:.submitted_at, login:.user.login, body:(.body // ""), state:(.state // "")}])
     + ($rc | [.[] | select(.created_at > $base)
                   | select((($author | length) == 0) or (.user.login != $author))
+                  | select(fresh_commit)
                   | {kind:"review_comment", at:.created_at, login:.user.login, path:.path, line:(.line // .original_line), body:.body, state:""}])
     | sort_by(.at)')
+
+  # Diagnostic only: how many codex commit-scoped items were dropped as stale, so
+  # a "my codex comment never appeared" investigation has a trace. Read-only count
+  # over the same reviews/review_comments; mirrors the fresh_commit scope (codex
+  # actor only) so it never counts kept human feedback. Feeds a stderr note,
+  # never the exit-code branch.
+  stale_dropped=$(jq -n --arg base "$baseline" --arg reviewed_head "$reviewed_head_sha" \
+    --arg pass_actor "$pass_actor" \
+    --argjson rv "$rv" --argjson rc "$rc" '
+    def stale:
+      (.user.login == $pass_actor)
+      and ($reviewed_head | length) > 0
+      and ((.commit_id // "") | length) > 0
+      and (.commit_id != $reviewed_head);
+    ($rv | [.[] | select((.submitted_at // "") > $base) | select(stale)] | length)
+    + ($rc | [.[] | select(.created_at > $base) | select(stale)] | length)')
+  if [ "${stale_dropped:-0}" != "0" ]; then
+    echo "→ ignored ${stale_dropped} stale review item(s): commit_id != reviewed_head_sha ($reviewed_head_sha)" >&2
+  fi
 
   count=$(printf '%s' "$new_items" | jq 'length')
   if [ "$count" != "0" ]; then
@@ -586,19 +626,29 @@ while :; do
     pass_by_text=$(jq -n \
       --argjson ic "$ic" --argjson rv "$rv" \
       --arg base "$baseline" --arg actor "$pass_actor" \
+      --arg reviewed_head "$reviewed_head_sha" \
       --arg pat "$pass_comment_pattern" '
       def matches:
         ($pat | length) > 0 and ((.body // "") | test($pat; "i"));
       # CHANGES_REQUESTED / DISMISSED reviews never count as pass, even if
       # the configured regex matches their body.
       def state_ok: ((.state // "") | (. != "CHANGES_REQUESTED" and . != "DISMISSED"));
+      # Stale-pass guard: a codex review evaluating a superseded commit can land
+      # after the baseline with a body matching the pass pattern. Counting it
+      # would report the live head as passed while reviewed_head_sha points at a
+      # commit codex never reviewed, and the caller live-head drift guard cannot
+      # catch it (live head == reviewed_head). So a review-form pass-comment must
+      # match the head we are waiting on. Fail open when commit_id is absent.
+      # issue_comment pass-comments carry no commit_id and cannot be pinned.
+      def fresh_commit: ((.commit_id // "") | length) == 0 or (.commit_id == $reviewed_head);
       ($ic | [.[] | select(.user.login == $actor)
                   | select(.created_at > $base)
                   | select(matches)] | length)
       + ($rv | [.[] | select(.user.login == $actor)
                   | select((.submitted_at // "") > $base)
                   | select(matches)
-                  | select(state_ok)] | length)')
+                  | select(state_ok)
+                  | select(fresh_commit)] | length)')
     if [ "$pass_by_text" != "0" ]; then
       echo "PASSED (comment matches CODEX_PASS_COMMENT_PATTERN from $pass_actor; baseline=$baseline)" >&2
       pass_comment_observed=true
