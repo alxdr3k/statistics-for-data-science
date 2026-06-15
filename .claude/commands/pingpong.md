@@ -570,8 +570,31 @@ turn 본문을 **자동 author**한다 (LLM authoring 자동화). v1 골격은
   `note {text}`·`relay {to, messages[], text}`는 `sender=user`로 passthrough,
   `stop`은 loop halt(session 유지), `resume`은 auto turn 진행. 미지원/모호
   verb는 처리 없이 `exit 2`로 되묻는다. control 파일은 1회 소비(`.consumed`).
-- 종료조건 status 패널 + P0-M3b acceptance는 `XAR-1Bb.3`, parallel auto
-  (synthesis+decision draft)는 `XAR-1Bb.4`.
+- **종료조건 + status 패널 (XAR-1Bb.3)**: `status --session <sid> [--json]`이
+  DEC-029 4-way OR 상태를 보여준다 — rounds(progress, superseded 제외) /
+  messages(raw flood, superseded 포함) / `.stopped`(durable user-stop) /
+  convergence(decision 차례 + 그 라운드의 모든 effective response 0 findings —
+  parallel은 "양쪽-0", 한쪽만 clean한 라운드는 convergence 아님). cap은
+  authoring 전 preflight(`>=`)로 enforce. `stop` 개입은 `.stopped`를 써서 이후
+  step도 halt(resume이 clear).
+  driver는 `step`을 terminal까지 반복하는 얇은 while-loop으로 0-input adversarial
+  cycle을 완주한다(P0-M3b). orchestrator는 **per-step stateless**라 cycle 중간에
+  죽어도 복구 절차가 없다 — `step`을 다시 실행하면 store에서 turn을 재유도하며
+  turn 단위 idempotent하다(store는 atomic write라 부분 메시지 없음; `stop`/`resume`
+  개입은 마커를 consume보다 먼저 적용해 crash 시에도 stop이 유실되지 않음).
+- **parallel auto (XAR-1Bb.4, DEC-047)**: `parallel_review` 세션에서
+  `step --auto-relay`는 양측 agent response를 자동수집한다(distinct finding_id —
+  initiator `F..`, reviewer `G..`). 두 response가 모이면 step이 `synthesis_ready`
+  를 emit한다 — **synthesis**(orchestrator-only, helper write 안 됨, disposition
+  token 없음 — option set + source trace만) + **decision draft**(confirm-only,
+  per-finding 제안 disposition + `next_action: needs_user`). 둘 다 session에
+  write되지 않으며, 사용자가 draft를 confirm/edit해야 `sender=user` decision으로
+  round가 닫힌다(`--auto-decision`은 parallel에서 무시 — disposition은 user 단독).
+  단, 양측 response가 **모두 0-finding**이면(진짜 수렴) step은 `synthesis_ready`
+  대신 `converged`를 emit하고 confirm-only **close-draft**(empty decisions /
+  `next_action: close` / `session_close`)를 surface한다 — 닫을 disposition이
+  없으므로. 이 close-draft도 helper write 안 됨(사용자 confirm으로 close); 한쪽만
+  clean한 라운드는 그대로 `synthesis_ready`.
 
 ### `/pingpong stop [<session_id>]`
 

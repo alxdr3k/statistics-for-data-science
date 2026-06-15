@@ -170,6 +170,31 @@ _make_sandbox_profile() {
   if [ -n "$RELAY_SESSION_REPO" ] && [ -d "$RELAY_SESSION_REPO" ]; then
     sess_repo_rule="  (subpath \"$(_canon "$RELAY_SESSION_REPO")\")"
   fi
+  # Re-allow READ of the reviewer CLI's own runtime even when it lives under
+  # HOME (e.g. nvm: ~/.nvm/versions/node/<ver>/{bin,lib}). The deny-HOME rule
+  # would otherwise block reading/exec'ing the binary + its node runtime (the
+  # dogfood hit this). Allow ONLY the binary's own dir (node + the binary) and
+  # its sibling `lib` (node_modules) — NOT the grandparent, which for a binary
+  # in ~/bin would be $HOME itself and would defeat deny-HOME (PR #94 codex P1).
+  local home_canon; home_canon="$(_canon "$home")"
+  local runtime_rules="" b d bindir libdir
+  for b in "$RELAY_CODEX_BIN" "$RELAY_CLAUDE_BIN"; do
+    d="$(command -v "$b" 2>/dev/null || true)"; [ -n "$d" ] || continue
+    bindir="$(_canon "$(dirname "$d")")"
+    # Never re-allow $HOME or / as a "runtime" tree.
+    if [ -n "$bindir" ] && [ "$bindir" != "$home_canon" ] && [ "$bindir" != "/" ]; then
+      case "$runtime_rules" in *"\"$bindir\""*) ;; *) runtime_rules="$runtime_rules
+  (subpath \"$bindir\")" ;; esac
+    fi
+    libdir="$(dirname "$(dirname "$d")")/lib"
+    if [ -d "$libdir" ]; then
+      libdir="$(_canon "$libdir")"
+      if [ "$libdir" != "$home_canon" ] && [ "$libdir" != "/" ]; then
+        case "$runtime_rules" in *"\"$libdir\""*) ;; *) runtime_rules="$runtime_rules
+  (subpath \"$libdir\")" ;; esac
+      fi
+    fi
+  done
   cat >"$prof" <<SBPL
 (version 1)
 (allow default)
@@ -192,7 +217,13 @@ $sess_repo_rule
   (subpath "$home/.claude")
   (subpath "$home/.config/codex")
   (subpath "$home/.config/claude")
-  (subpath "$home/.cache"))
+  (subpath "$home/.cache")$runtime_rules)
+(allow file-read-metadata
+  (subpath "$home"))
+(deny file-read*
+  (subpath "$repo")
+  (subpath "$store")
+$sess_repo_rule)
 SBPL
   printf '%s\n' "$prof"
 }
@@ -203,8 +234,16 @@ SBPL
 # CLI's temp writes land inside the sandbox's only writable subtree.
 _env_prefix() {
   local scratch="$1"
+  # Put the reviewer-CLI dirs on PATH so the cleared env can find the binary's
+  # own runtime (e.g. the nvm `node` that codex/claude's shebang needs) — the
+  # dogfood hit `env: codex: No such file or directory` otherwise.
+  local path="${PATH:-/usr/bin:/bin}" cdir ddir
+  cdir="$(command -v "$RELAY_CODEX_BIN" 2>/dev/null || true)"; cdir="${cdir%/*}"
+  ddir="$(command -v "$RELAY_CLAUDE_BIN" 2>/dev/null || true)"; ddir="${ddir%/*}"
+  [ -n "$ddir" ] && case ":$path:" in *":$ddir:"*) ;; *) path="$ddir:$path" ;; esac
+  [ -n "$cdir" ] && case ":$path:" in *":$cdir:"*) ;; *) path="$cdir:$path" ;; esac
   RELAY_ENV=(env -i
-    "HOME=${HOME:-}" "PATH=${PATH:-/usr/bin:/bin}" "USER=${USER:-}"
+    "HOME=${HOME:-}" "PATH=$path" "USER=${USER:-}"
     "TERM=${TERM:-xterm}" "LANG=${LANG:-en_US.UTF-8}" "TMPDIR=$scratch")
   # Pass through the SUPPORTED reviewer-CLI auth credentials when set — API-key /
   # CI setups need these to make the model call; OAuth-in-HOME setups don't
@@ -217,6 +256,34 @@ _env_prefix() {
     [ -n "$val" ] && RELAY_ENV+=("$v=$val")
   done
   return 0   # never let a trailing false test trip set -e
+}
+
+# Redirect the reviewer CLI's mutable state ($CODEX_HOME / Claude config dir)
+# into a scratch subdir, copying only the auth/config it needs to read, so the
+# CLI authenticates while every write it makes lands inside the sandbox's only
+# writable subtree — keeping ~/.codex|~/.claude read-only (PR #94 codex P1).
+# Appends the *_HOME var(s) to RELAY_ENV.
+_redirect_cli_home() {
+  local actor="$1" scratch="$2" src dst
+  case "$actor" in
+    codex)
+      src="${CODEX_HOME:-$HOME/.codex}"; dst="$scratch/.codex"
+      mkdir -p "$dst"
+      [ -f "$src/auth.json" ]   && cp "$src/auth.json"   "$dst/" 2>/dev/null || true
+      [ -f "$src/config.toml" ] && cp "$src/config.toml" "$dst/" 2>/dev/null || true
+      RELAY_ENV+=("CODEX_HOME=$dst")
+      ;;
+    claude)
+      # Claude Code reads its config dir from CLAUDE_CONFIG_DIR (falling back to
+      # ~/.claude). Mirror auth into scratch and point the CLI there.
+      src="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; dst="$scratch/.claude"
+      mkdir -p "$dst"
+      [ -f "$src/.credentials.json" ] && cp "$src/.credentials.json" "$dst/" 2>/dev/null || true
+      [ -f "$src/settings.json" ]     && cp "$src/settings.json"     "$dst/" 2>/dev/null || true
+      RELAY_ENV+=("CLAUDE_CONFIG_DIR=$dst")
+      ;;
+  esac
+  return 0
 }
 
 # Populates the global array RELAY_SBX with the sandbox argv prefix (empty when
@@ -263,6 +330,36 @@ _load_session_repo() {
   RELAY_SESSION_REPO="$(jq -r '(.repo | if type=="object" then .path else . end) // ""' "$SESSIONS_DIR/$1/session.json" 2>/dev/null || true)"
   if [ "$RELAY_SESSION_REPO" = "null" ]; then RELAY_SESSION_REPO=""; fi
   return 0
+}
+
+# DEC-029 convergence signal (정밀화 — matches "양쪽 finding 0"): TRUE only when
+# the CURRENT round has at least one effective (post-last-decision, non-
+# superseded) response AND every one of them has zero findings. In parallel_review
+# that means BOTH reviewers came back clean — a single clean response is NOT
+# convergence (PR #95). In adversarial it reduces to the single reviewer. Using
+# the effective set (same last-decision + supersedes filter as the synthesis)
+# avoids treating a prior round's clean response or a superseded one as
+# convergence. Returns 0 (true) / 1 (false); a round with no effective response
+# is false (nothing has converged yet).
+_effective_responses_all_zero() {
+  local sid="$1" sdir="$SESSIONS_DIR/$sid"
+  local last_dec last_dec_id="000000"
+  last_dec="$(ls "$sdir/messages" 2>/dev/null | grep -E '^[0-9]{6}-decision\.json$' | sort -n | tail -1 || true)"
+  [ -n "$last_dec" ] && last_dec_id="${last_dec%%-*}"
+  local superseded
+  superseded="$(cat "$sdir"/messages/*.json 2>/dev/null \
+    | jq -r '.body.supersedes // empty' 2>/dev/null | sort -u || true)"
+  local count=0 nonzero=0 f id n
+  for f in "$sdir"/messages/*-response.json; do
+    [ -e "$f" ] || continue
+    id="$(basename "$f")"; id="${id%%-*}"
+    [ "$((10#$id))" -gt "$((10#$last_dec_id))" ] || continue
+    if [ -n "$superseded" ] && printf '%s\n' "$superseded" | grep -qx "$id"; then continue; fi
+    count=$((count + 1))
+    n="$(jq -r '(.body.findings // []) | length' "$f" 2>/dev/null || echo 1)"
+    [ "$n" = "0" ] || nonzero=$((nonzero + 1))
+  done
+  [ "$count" -ge 1 ] && [ "$nonzero" -eq 0 ]
 }
 
 # original_user_instructions of the LATEST request (the current round's user
@@ -315,13 +412,20 @@ _message_count() {
 _author_turn() {
   local sid="$1" actor="$2" kind="$3" instructions="$4"
   local sdir="$SESSIONS_DIR/$sid"
+  # _author_turn runs inside a $(...) subshell, so a failure cause cannot be
+  # returned via a global; hand it to the caller through a session file instead.
+  local diag_file="$sdir/.relay/last_author_error"
+  rm -f "$diag_file" 2>/dev/null || true
   _load_session_repo "$sid"
   local scratch; scratch="$(mktemp -d -t relay-scratch.XXXXXX)"
   local prompt_file="$scratch/prompt.txt"
   local out_file="$scratch/out.json"
   local schema_file="$scratch/schema.json"
 
-  _write_schema "$kind" "$schema_file"
+  # dialogue mode gates the parallel-only response schema fields (concurs_with/
+  # disputes); request/decision schemas are mode-independent.
+  local dmode_aut; dmode_aut="$(jq -r '.dialogue_mode // ""' <<<"$(_whose_turn "$sid")" 2>/dev/null || printf '')"
+  _write_schema "$kind" "$schema_file" "$dmode_aut"
   _render_prompt "$sid" "$actor" "$kind" "$instructions" >"$prompt_file"
 
   # G1 provenance: record a REDACTED argv (flags/model/version only — never the
@@ -353,6 +457,12 @@ _author_turn() {
       _cleanup_scratch "$scratch"; return 6
     fi
     _env_prefix "$scratch"          # → RELAY_ENV (env allowlist, G2)
+    # Redirect the reviewer CLI's mutable state into the scratch tree instead of
+    # write-allowing ~/.codex|~/.claude — that would let the subprocess overwrite
+    # local agent credentials/config outside agent-dialog.sh write (PR #94 codex
+    # P1). The CLI's auth is COPIED into the scratch home so it still
+    # authenticates while all its writes land in the only writable subtree.
+    _redirect_cli_home "$actor" "$scratch"   # appends *_HOME=scratch to RELAY_ENV
     _build_cli_argv "$actor" "$model" "$out_file" "$schema_file"  # → RELAY_CLI
     _provenance "$sid" "$actor" "$kind" "$prompt_file" "${RELAY_CLI[*]}" "$model"
     # prompt is fed on stdin from the finite prompt file (EOF → no hang; argv
@@ -363,12 +473,26 @@ _author_turn() {
          "${RELAY_SBX[@]}" "${RELAY_ENV[@]}" "${RELAY_CLI[@]}" \
          <"$prompt_file" >"$scratch/stdout.log" 2>"$scratch/err.log" ); then
       [ -n "$_sandbox_profile_path" ] && rm -f "$_sandbox_profile_path"
+      # claude -p signals auth/runtime errors via an is_error envelope on stdout
+      # AND (under --json-schema) exits non-zero, so capture its own message here
+      # before the run is discarded — else the cause degrades to an opaque rc=4.
+      { [ "$actor" = "claude" ] && _capture_claude_diag "$scratch/stdout.log" "$diag_file"; } || true
       _cleanup_scratch "$scratch"; return 4
     fi
     [ -n "$_sandbox_profile_path" ] && rm -f "$_sandbox_profile_path"
     # codex writes the final message to $out_file (-o); claude emits JSON on
     # stdout (--output-format json). Normalize to $out_file.
     if [ "$actor" = "claude" ]; then
+      # claude -p can also exit 0 while still carrying an is_error envelope (e.g.
+      # --output-format json without a schema). Detect that and surface the cause
+      # rather than failing to parse "Not logged in ..." as a free-text body. The
+      # common macOS trigger is keychain-only auth: with CLAUDE_CONFIG_DIR
+      # redirected to scratch (G3 process boundary) the keychain is intentionally
+      # NOT inherited — provide auth via the G2 env allowlist
+      # (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) or ~/.claude/.credentials.json.
+      if _capture_claude_diag "$scratch/stdout.log" "$diag_file"; then
+        _cleanup_scratch "$scratch"; return 4
+      fi
       _extract_claude_json "$scratch/stdout.log" >"$out_file" || { _cleanup_scratch "$scratch"; return 4; }
     fi
   fi
@@ -385,11 +509,32 @@ _author_turn() {
 
 _cleanup_scratch() { rm -rf "$1" 2>/dev/null || true; }
 
+# If a claude -p envelope reports is_error, record its message into the session
+# diag file (so cmd_step can surface it across the $(...) subshell boundary) and
+# return 0 (true = "this was an error"); return 1 when no is_error is present.
+_capture_claude_diag() {
+  local log="$1" diag_file="$2"
+  jq -e '.is_error == true' "$log" >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$diag_file")"
+  printf 'claude reported is_error: %s' \
+    "$(jq -r '.result // "unknown"' "$log" 2>/dev/null | tr '\n' ' ' | head -c 160)" >"$diag_file"
+  return 0
+}
+
 # Build the real CLI argv (DEC-048 stdin-file prompt + CLI-specific capture)
 # into the global array RELAY_CLI (bash-3.2 compatible; no namerefs).
 _build_cli_argv() {
   local actor="$1" model="$2" out_file="$3" schema_file="$4"
   RELAY_CLI=()
+  # Resolve the binary to an ABSOLUTE path so `env -i` (cleared env) does not
+  # have to find it on PATH, and remember its dir so _env_prefix can put the
+  # node/runtime alongside it on PATH (the dogfood hit `env: codex: No such
+  # file or directory` when the cleared PATH lacked the nvm bin dir).
+  local bin
+  case "$actor" in
+    codex)  bin="$(command -v "$RELAY_CODEX_BIN" 2>/dev/null || printf '%s' "$RELAY_CODEX_BIN")" ;;
+    claude) bin="$(command -v "$RELAY_CLAUDE_BIN" 2>/dev/null || printf '%s' "$RELAY_CLAUDE_BIN")" ;;
+  esac
   case "$actor" in
     codex)
       # --ephemeral: do NOT load $CODEX_HOME/config.toml (auth still uses
@@ -398,7 +543,7 @@ _build_cli_argv() {
       # author_failed (PR #91 codex P1). -c mcp_servers={} also overrides any
       # managed-config MCP servers (defense in depth — a write-capable MCP/IDE
       # server could mutate state outside agent-dialog.sh write).
-      RELAY_CLI=("$RELAY_CODEX_BIN" exec - --ephemeral --skip-git-repo-check
+      RELAY_CLI=("$bin" exec - --ephemeral --skip-git-repo-check
                  -s read-only -c approval_policy=never -c "mcp_servers={}"
                  -o "$out_file" --output-schema "$schema_file")
       [ -n "$model" ] && RELAY_CLI+=(-m "$model")
@@ -409,7 +554,7 @@ _build_cli_argv() {
       # output like codex's --output-schema so a free-text/shape-drift response
       # can't reach the helper as an unvalidated body.
       local schema_inline; schema_inline="$(jq -c . "$schema_file" 2>/dev/null || cat "$schema_file")"
-      RELAY_CLI=("$RELAY_CLAUDE_BIN" -p --output-format json --json-schema "$schema_inline")
+      RELAY_CLI=("$bin" -p --output-format json --json-schema "$schema_inline")
       [ -n "$model" ] && RELAY_CLI+=(--model "$model")
       ;;
     *) die 2 "unknown actor: $actor" ;;
@@ -466,9 +611,24 @@ _sha256() {
 _render_prompt() {
   local sid="$1" actor="$2" kind="$3" instructions="$4"
   local role
+  # In parallel_review BOTH agents review independently; finding_ids must be
+  # distinct per agent or the helper rejects the collision (Q-056/DEC-046):
+  # initiator uses F.., reviewer uses G... Instruct the right prefix.
+  local prefix="F" rev="" dmode2=""
+  if [ "$kind" = "response" ]; then
+    dmode2="$(jq -r '.dialogue_mode' <<<"$(_whose_turn "$sid")")"
+    if [ "$dmode2" = "parallel_review" ]; then
+      rev="$(jq -r '.reviewer_agent // ""' "$SESSIONS_DIR/$sid/session.json" 2>/dev/null || true)"
+      [ "$actor" = "$rev" ] && prefix="G"
+    fi
+  fi
+  local par_resp_role="You are a REVIEWER ($actor) in a PARALLEL review. Author a response body as JSON: {\"summary\":..., \"findings\":[{\"finding_id\":\"${prefix}1\",\"claim\":..., \"concurs_with\":\"\", \"disputes\":\"\"}]}. Use finding_id prefix '${prefix}' (e.g. ${prefix}1, ${prefix}2). If the transcript already contains the OTHER agent's findings (a different prefix), then for each of your findings set concurs_with to a peer finding_id you independently confirm, OR disputes to a peer finding_id you directly contradict — never both; otherwise leave both \"\". If you are the first mover (no peer findings yet) leave both \"\". Give sharp, specific findings on the latest request."
   case "$kind" in
     request)  role="You are the INITIATOR ($actor). Author the next request body as JSON: {\"topic\":..., \"prompt\":..., \"original_user_instructions\":...}. Use the user instructions below verbatim for original_user_instructions." ;;
-    response) role="You are the REVIEWER ($actor) in an adversarial review. Author a response body as JSON: {\"summary\":..., \"findings\":[{\"finding_id\":\"F1\",\"claim\":...}], \"convergence\":null}. Give sharp, specific findings on the latest request." ;;
+    response)
+      if [ "$dmode2" = "parallel_review" ]; then role="$par_resp_role"
+      else role="You are a REVIEWER ($actor). Author a response body as JSON: {\"summary\":..., \"findings\":[{\"finding_id\":\"${prefix}1\",\"claim\":...}], \"convergence\":null}. Use finding_id prefix '${prefix}' (e.g. ${prefix}1, ${prefix}2). Give sharp, specific findings on the latest request."
+      fi ;;
     decision) role="You are the INITIATOR ($actor). Disposition the reviewer's findings. Author a decision body as JSON: {\"decisions\":[{\"finding_id\":...,\"action\":\"accepted|rejected|deferred\",\"reason_one_line\":...}], \"next_action\":\"continue|close|needs_user\", \"session_close\":true|false, \"summary\":..., \"original_user_instructions\":...}. Close when converged." ;;
   esac
   printf '%s\n\n' "$role"
@@ -479,28 +639,53 @@ _render_prompt() {
   _helper transcript --session "$sid"
 }
 
+# OpenAI/codex structured output (strict mode) requires EVERY object to set
+# `additionalProperties: false` and to list all its properties in `required`
+# (else codex exec --output-schema fails with HTTP 400 "additionalProperties is
+# required ... to be false"). The dogfood (XAR-1Bb.3) surfaced this. original_
+# user_instructions is intentionally omitted from the decision schema — the
+# orchestrator injects the authoritative value post-hoc via _set_oui — so the
+# model never authors provenance.
+#
+# XAR-1Bb.5 (DEC-047 iv): the parallel_review response schema additionally
+# requires per-finding `concurs_with` / `disputes` (peer finding_id or "") so the
+# second mover can declare an explicit agreement/conflict stance toward the first
+# mover's findings (which it sees in the transcript). The synthesis consumes
+# these to pre-fill the confirm-only decision draft (agreement → accepted,
+# conflict → deferred+needs_user). The adversarial response schema is left
+# byte-identical so the already-accepted adversarial e2e path is unchanged.
 _write_schema() {
-  local kind="$1" path="$2"
+  local kind="$1" path="$2" mode="${3:-}"
   case "$kind" in
     response)
-      cat >"$path" <<'JSON'
-{"type":"object","required":["summary","findings"],"properties":{
+      if [ "$mode" = "parallel_review" ]; then
+        cat >"$path" <<'JSON'
+{"type":"object","additionalProperties":false,"required":["summary","findings"],"properties":{
 "summary":{"type":"string"},
-"findings":{"type":"array","items":{"type":"object","required":["finding_id","claim"],
+"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["finding_id","claim","concurs_with","disputes"],
+"properties":{"finding_id":{"type":"string"},"claim":{"type":"string"},
+"concurs_with":{"type":"string"},"disputes":{"type":"string"}}}}}}
+JSON
+      else
+        cat >"$path" <<'JSON'
+{"type":"object","additionalProperties":false,"required":["summary","findings"],"properties":{
+"summary":{"type":"string"},
+"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["finding_id","claim"],
 "properties":{"finding_id":{"type":"string"},"claim":{"type":"string"}}}}}}
 JSON
+      fi
       ;;
     decision)
       cat >"$path" <<'JSON'
-{"type":"object","required":["decisions","next_action","session_close","summary"],"properties":{
-"decisions":{"type":"array","items":{"type":"object","required":["finding_id","action","reason_one_line"],
+{"type":"object","additionalProperties":false,"required":["decisions","next_action","session_close","summary"],"properties":{
+"decisions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["finding_id","action","reason_one_line"],
 "properties":{"finding_id":{"type":"string"},"action":{"type":"string"},"reason_one_line":{"type":"string"}}}},
 "next_action":{"type":"string"},"session_close":{"type":"boolean"},"summary":{"type":"string"}}}
 JSON
       ;;
     request)
       cat >"$path" <<'JSON'
-{"type":"object","required":["topic","prompt","original_user_instructions"],"properties":{
+{"type":"object","additionalProperties":false,"required":["topic","prompt","original_user_instructions"],"properties":{
 "topic":{"type":"string"},"prompt":{"type":"string"},"original_user_instructions":{"type":"string"}}}
 JSON
       ;;
@@ -523,7 +708,11 @@ cmd_capabilities() {
   local sbx; sbx="$(_sandbox_available)"
   local caps
   if [ "$dmode" = "parallel_review" ]; then
-    caps="REFUSED — parallel_review decision is sender=user (DEC-043/Q-052); use XAR-1Bb.4 for parallel auto"
+    # DEC-047: parallel auto = auto-relay (collect both responses) + synthesis
+    # (orchestrator-only) + decision DRAFT. The final disposition stays
+    # user-required (decision sender=user, DEC-043/Q-052) — --auto-decision is
+    # NOT honored here.
+    caps="auto-relay (양측 response 자동수집) + synthesis (orchestrator-only) + decision draft (confirm-only); disposition은 user confirm-required"
   else
     caps="auto-relay (response 자동수집+relay)"
     [ "$auto_decision" = "true" ] && caps="$caps + auto-decision (0-input adversarial cycle)"
@@ -700,6 +889,16 @@ _emit_step() {
 # note/relay/stop emit + EXIT (auto turn defers a step); resume / no-intervention
 # return 0 to fall through. Unsupported/malformed → emit + exit 2 (ask the user).
 # The control file is consumed (renamed) so it is processed at most once.
+
+# Consume the between-step control file: rename → `.consumed` for audit (fall back
+# to delete). No-op for the --intervene/stdin channels. Idempotent.
+_consume_control() {
+  local from="$1" control_file="$2"
+  [ "$from" = "control" ] || return 0
+  mv "$control_file" "$control_file.consumed" 2>/dev/null || rm -f "$control_file" 2>/dev/null || true
+  return 0
+}
+
 _handle_intervention() {
   local sid="$1" intervene="$2" control_file="$3" read_stdin="$4" dry="$5"
   local payload="" from=""
@@ -722,19 +921,33 @@ _handle_intervention() {
     _emit_step "dry_run" "would process intervention verb='$dverb' (from $from); no write/consume"; exit 0
   fi
 
-  # Consume the control file immediately (rename, not delete, for audit) so a
-  # malformed payload can't loop.
-  if [ "$from" = "control" ]; then
-    mv "$control_file" "$control_file.consumed" 2>/dev/null || rm -f "$control_file" 2>/dev/null || true
-  fi
-
+  # Mid-cycle resume / crash-safety (Q-057): the orchestrator holds no cross-step
+  # state — a restart just re-runs `step`, which re-derives the turn from the
+  # file-first store (whose messages are atomic-rename-complete). The one
+  # non-idempotent step-local side effect is consuming the control file, so the
+  # consume order matters per verb. For the DURABLE verbs (stop/resume) the
+  # `.stopped` marker is idempotent, so apply it BEFORE consuming `.control`: a
+  # crash in the apply→consume window then re-reads `.control` next step and
+  # re-applies (no dropped stop — a dropped stop would let the loop keep running).
+  # For note/relay/malformed we consume FIRST so a malformed payload can't loop
+  # and a crash can't duplicate the appended message (a dropped note is
+  # recoverable; the user re-sends).
   local verb; verb="$(jq -r '.verb // ""' <<<"$payload" 2>/dev/null || true)"
   case "$verb" in
     resume)
+      rm -f "$SESSIONS_DIR/$sid/.stopped" 2>/dev/null || true  # clear durable stop (F2) — idempotent, before consume
+      _consume_control "$from" "$control_file"
       return 0 ;;  # fall through to author the normal turn
     stop)
-      _emit_step "stopped" "user stop — halting the auto-relay loop (session left open)"; exit 0 ;;
+      # Durable stop (PR/dogfood F2): a runtime-only stop would let a later step
+      # observe an open session and resume. Persist a `.stopped` marker that
+      # step/status honor until `resume` clears it. Written BEFORE consume so a
+      # crash in the window cannot drop the stop.
+      : >"$SESSIONS_DIR/$sid/.stopped" 2>/dev/null || true
+      _consume_control "$from" "$control_file"
+      _emit_step "stopped" "user stop — durable .stopped marker written (resume clears it)"; exit 0 ;;
     note)
+      _consume_control "$from" "$control_file"   # consume first: malformed/dup guard
       # text MUST be a JSON string (explicit-JSON channel; a coerced number etc.
       # must be rejected, not recorded — PR #93 codex P2).
       jq -e '(.text|type)=="string"' <<<"$payload" >/dev/null 2>&1 \
@@ -749,6 +962,7 @@ _handle_intervention() {
       rm -f "$nb" "$nb.err"
       _emit_step "intervened" "note recorded (sender=user); auto turn defers to next step"; exit 0 ;;
     relay)
+      _consume_control "$from" "$control_file"   # consume first: malformed/dup guard
       jq -e '(.to|type)=="string" and (.text|type)=="string"' <<<"$payload" >/dev/null 2>&1 \
         || { _emit_step "intervention_rejected" "relay to/text must be JSON strings"; exit 2; }
       local to text; to="$(jq -r '.to' <<<"$payload" 2>/dev/null || true)"
@@ -764,8 +978,146 @@ _handle_intervention() {
       rm -f "$rb" "$rb.err"
       _emit_step "intervened" "relay to $to recorded (sender=user); auto turn defers to next step"; exit 0 ;;
     *)
+      _consume_control "$from" "$control_file"   # malformed → consume so it can't loop
       _emit_step "intervention_rejected" "unsupported/ambiguous verb '$verb' (use note|relay|stop|resume) — not processed"; exit 2 ;;
   esac
+}
+
+# Parallel auto (DEC-047 / XAR-1Bb.4): when both responses of the round are in,
+# emit (a) a SYNTHESIS artifact and (b) a decision DRAFT — both orchestrator-only
+# (never written to the session). The synthesis collects both responses, traces
+# each finding to its source, and offers a next-action OPTION SET with **no
+# disposition token** (G5). The draft is a confirm-only `sender=user` decision
+# proposal (per-finding `deferred`, next_action `needs_user`) that the user
+# confirms/edits to actually close the round (user authority preserved).
+_emit_parallel_synthesis() {
+  local sid="$1" sdir="$SESSIONS_DIR/$sid"
+  local last_dec last_dec_id="000000"
+  last_dec="$(ls "$sdir/messages" 2>/dev/null | grep -E '^[0-9]{6}-decision\.json$' | sort -n | tail -1 || true)"
+  [ -n "$last_dec" ] && last_dec_id="${last_dec%%-*}"
+  # Effective round set only (PR #95 codex P2): exclude responses that have been
+  # replaced via body.supersedes, matching the helper's coverage union — else
+  # the synthesis/draft would ask the user to disposition stale findings.
+  local superseded
+  superseded="$(cat "$sdir"/messages/*.json 2>/dev/null \
+    | jq -r '.body.supersedes // empty' 2>/dev/null | sort -u || true)"
+  local resp_files=() f id
+  for f in "$sdir"/messages/*-response.json; do
+    [ -e "$f" ] || continue
+    id="$(basename "$f")"; id="${id%%-*}"
+    [ "$((10#$id))" -gt "$((10#$last_dec_id))" ] || continue
+    if [ -n "$superseded" ] && printf '%s\n' "$superseded" | grep -qx "$id"; then continue; fi
+    resp_files+=("$f")
+  done
+  if [ "${#resp_files[@]}" -eq 0 ]; then
+    _emit_step "paused" "parallel decision turn but no round responses found"; return 0
+  fi
+  # XAR-1Bb.5 (DEC-047 iv): classify each union finding by the explicit peer
+  # stance the second mover declared (concurs_with → agreement, disputes →
+  # conflict; conflict wins if both). A stance reference is honored ONLY when it
+  # names an EXISTING finding from a DIFFERENT agent (PR #97 codex P2): a
+  # hallucinated id (e.g. `concurs_with: "F99"`) or a self/own-agent reference is
+  # dropped, so the finding stays `single`/deferred and a user can't confirm an
+  # unreviewed singleton as accepted. Honored links are stored BIDIRECTIONALLY
+  # (PR #97 codex P3) so the referenced finding's row also carries the peer link
+  # (else its draft reason / synthesis trace would show an empty counterpart).
+  # Missing stance fields (older data / stubs / a model that left them "")
+  # degrade gracefully to "single" = the prior all-deferred behaviour. Computed
+  # once and injected into BOTH the synthesis (trace only — NO disposition token,
+  # DEC-047 v) and the confirm-only decision draft (agreement → accepted
+  # suggestion, conflict/single → deferred).
+  local classified summaries synth draft
+  classified="$(jq -s '
+    ( [ .[] | .sender as $s | (.body.findings[]? |
+          {finding_id, source:$s, claim:(.claim // ""),
+           concurs_with:(.concurs_with // ""), disputes:(.disputes // "")}) ] ) as $all
+    | ( reduce $all[] as $f ({}; . + {($f.finding_id): $f.source}) ) as $src
+    | ( [ $all[] | select(.concurs_with != "" and $src[.concurs_with] != null
+                          and $src[.concurs_with] != .source)
+          | {self:.finding_id, peer:.concurs_with} ] ) as $agl
+    | ( [ $all[] | select(.disputes != "" and $src[.disputes] != null
+                          and $src[.disputes] != .source)
+          | {self:.finding_id, peer:.disputes} ] ) as $cfl
+    | ( reduce $agl[] as $l ({}; .[$l.self] += [$l.peer] | .[$l.peer] += [$l.self]) ) as $ap
+    | ( reduce $cfl[] as $l ({}; .[$l.self] += [$l.peer] | .[$l.peer] += [$l.self]) ) as $cp
+    | [ $all[] | .finding_id as $id
+        | . + (if   ($cp[$id]) then {klass:"conflict",  peers:($cp[$id]|unique)}
+               elif ($ap[$id]) then {klass:"agreement", peers:($ap[$id]|unique)}
+               else {klass:"single", peers:[]} end) ]' \
+    "${resp_files[@]}")"
+  summaries="$(jq -s '[ .[] | {source:.sender, summary:(.body.summary // ""),
+                              findings:[ .body.findings[]?.finding_id ]} ]' "${resp_files[@]}")"
+  synth="$(jq -n --argjson c "$classified" --argjson r "$summaries" '
+    {kind:"relay_synthesis",
+     note:"orchestrator-only — NOT a session message; NO disposition token (option set + agreement/conflict trace only)",
+     responses:$r,
+     union_findings:[ $c[] | {finding_id, source, claim} ],
+     agreements:[ $c[] | select(.klass=="agreement") | {finding_id, source, peers} ],
+     conflicts:[ $c[] | select(.klass=="conflict") | {finding_id, source, peers} ],
+     next_action_options:["accept_all","reject_all","mixed","continue","needs_user"]}')"
+  draft="$(jq -n --argjson c "$classified" '
+    {kind:"relay_decision_draft",
+     note:"confirm-only — sender=user; NOT written until you confirm/edit; you own the final disposition. Pre-filled actions are SUGGESTIONS: agreement (peer-confirmed) → accepted; conflict/single-agent → deferred.",
+     decisions:[ $c[] |
+       {finding_id, source,
+        action:(if .klass=="agreement" then "accepted" else "deferred" end),
+        reason_one_line:(
+          if   .klass=="agreement" then ("agreement: peer-confirmed with " + (.peers|join(", ")) + " — confirm accepted or override")
+          elif .klass=="conflict"  then ("conflict: disputed with " + (.peers|join(", ")) + " — adjudicate accepted or rejected")
+          else ("single-agent (" + .source + ") finding — confirm accepted, rejected or deferred") end)} ],
+     next_action:"needs_user", session_close:false}')"
+  if [ "$STEP_JSON" = "true" ]; then
+    jq -nc --argjson syn "$synth" --argjson drf "$draft" --arg sid "$sid" \
+      '{kind:"relay_step", session_id:$sid, status:"synthesis_ready",
+        detail:"both responses collected; confirm/edit the sender=user decision draft to close the round",
+        synthesis:$syn, decision_draft:$drf}'
+  else
+    printf 'relay step: synthesis_ready — confirm the sender=user decision draft\n--- synthesis (orchestrator-only) ---\n'
+    printf '%s\n' "$synth" | jq .
+    printf -- '--- decision draft (confirm-only) ---\n'
+    printf '%s\n' "$draft" | jq .
+  fi
+}
+
+# Parallel convergence (정밀화): both reviewers returned 0 findings, so there is
+# nothing to disposition. Surface an explicit `converged` step carrying a
+# confirm-only close DRAFT (empty decisions, next_action close, session_close).
+# Like the synthesis draft it is orchestrator-only and NOT written to the helper
+# — DEC-047 keeps the parallel decision sender=user, so the user confirms the
+# close. This replaces the generic empty synthesis for the both-clean case.
+_emit_convergence_close_draft() {
+  local sid="$1" draft
+  draft="$(jq -n '{kind:"relay_decision_draft",
+    note:"confirm-only — sender=user; convergence close (both reviewers returned 0 findings); nothing to disposition",
+    decisions:[], next_action:"close", session_close:true}')"
+  if [ "$STEP_JSON" = "true" ]; then
+    jq -nc --argjson drf "$draft" --arg sid "$sid" \
+      '{kind:"relay_step", session_id:$sid, status:"converged",
+        detail:"both reviewers returned 0 findings — converged; confirm the sender=user close to end the round",
+        decision_draft:$drf}'
+  else
+    printf 'relay step: converged — both reviewers returned 0 findings; confirm the sender=user close\n'
+    printf '%s\n' "$draft" | jq .
+  fi
+}
+
+# Deterministically author a CLOSE decision on convergence (0-finding response):
+# empty dispositions (nothing to dispose) + next_action close + session_close.
+# Persisted through the helper like any other turn (validation still applies).
+_close_on_convergence() {
+  local sid="$1" actor="$2"
+  local body; body="$(mktemp -t relay-conv.XXXXXX)"
+  jq -n '{decisions:[], next_action:"close", session_close:true,
+          summary:"converged: reviewer returned no findings"}' >"$body"
+  body="$(_set_oui "$body" "" "$sid")"
+  local wrc=0
+  _helper write --session "$sid" --kind decision --sender "$actor" \
+    --body-file "$body" >/dev/null 2>"$body.err" || wrc=$?
+  if [ "$wrc" -ne 0 ]; then
+    _emit_step "helper_rejected" "convergence close: $(head -1 "$body.err" 2>/dev/null)"; rm -f "$body" "$body.err"; exit 5
+  fi
+  rm -f "$body" "$body.err"
+  _emit_step "converged_closed" "0-finding response → deterministic convergence close (DEC-029)"
 }
 
 cmd_step() {
@@ -799,6 +1151,12 @@ cmd_step() {
   # handler; resume / no-intervention return 0 and fall through to the auto turn.
   _handle_intervention "$sid" "$intervene" "$control_file" "$read_stdin" "$dry"
 
+  # F2: a durable user stop halts every subsequent step (not just the one that
+  # issued it) until `resume` clears the marker.
+  if [ -f "$SESSIONS_DIR/$sid/.stopped" ]; then
+    _emit_step "stopped" "durable user-stop marker (.stopped) present; send {\"verb\":\"resume\"} to continue"; exit 0
+  fi
+
   local obs; obs="$(_whose_turn "$sid")" || die 3 "step: session not found: $sid"
   local dmode terminal next_actor next_kind waiting latest_na
   dmode="$(jq -r '.dialogue_mode' <<<"$obs")"
@@ -807,20 +1165,34 @@ cmd_step() {
   next_kind="$(jq -r '.next_kind' <<<"$obs")"
   waiting="$(jq -r '.waiting_on_user' <<<"$obs")"
   latest_na="$(jq -r '.latest_protocol.next_action // ""' <<<"$obs")"
+  # parallel_review can have BOTH agents pending a response — pick the first.
+  local next_actors0; next_actors0="$(jq -r '.next_actors[0] // ""' <<<"$obs")"
 
-  # Refuse parallel_review (decision is sender=user — XAR-1Bb.4 territory).
-  if [ "$dmode" = "parallel_review" ]; then
-    _emit_step "refused" "parallel_review auto is XAR-1Bb.4 (decision sender=user)"; exit 0
-  fi
   if [ "$terminal" = "true" ]; then
     _emit_step "terminal" "session closed; no further turns"; exit 0
   fi
 
-  # DEC-029 cap (skeleton enforcement; full status panel is XAR-1Bb.3).
+  # DEC-029 cap — preflight HARD gate (before authoring; `-ge`, never `>`).
   local rounds messages
   rounds="$(_round_count "$sid")"; messages="$(_message_count "$sid")"
   if [ "$rounds" -ge "$RELAY_MAX_ROUNDS" ] || [ "$messages" -ge "$RELAY_MAX_MESSAGES" ]; then
     _emit_step "cap_reached" "rounds=$rounds/$RELAY_MAX_ROUNDS messages=$messages/$RELAY_MAX_MESSAGES (DEC-029)"; exit 0
+  fi
+
+  # DEC-029 deterministic convergence (PR #94 codex P2) — ADVERSARIAL ONLY here
+  # (PR #95 codex P1): when the reviewer's effective response(s) this round are
+  # ALL zero-finding (정밀화 PR — `_effective_responses_all_zero`, not just the
+  # latest message), the orchestrator CLOSES deterministically rather than
+  # authoring another `continue`. Parallel convergence is handled separately in
+  # the decision branch below because its decision is sender=user (DEC-047) — the
+  # orchestrator must NOT auto-write it, so it surfaces a converged close-draft
+  # for the user to confirm instead of closing here.
+  if [ "$dmode" != "parallel_review" ] \
+     && [ "$next_kind" = "decision" ] && _effective_responses_all_zero "$sid"; then
+    if [ "$auto_decision" = "true" ]; then
+      _close_on_convergence "$sid" "$next_actor"; exit 0
+    fi
+    _emit_step "converged" "reviewer returned 0 findings — convergence; author a close decision (sender=$next_actor)"; exit 0
   fi
 
   # User-gated turns: a `continue`/`needs_user` request needs fresh user
@@ -834,6 +1206,26 @@ cmd_step() {
       [ "$auto_relay" = "true" ] || { _emit_step "paused" "response turn but --auto-relay not set"; exit 0; }
       ;;
     decision)
+      if [ "$dmode" = "parallel_review" ]; then
+        # DEC-047: both responses are in. Emit the synthesis (orchestrator-only,
+        # NOT a helper message, NO disposition token) + the decision DRAFT
+        # (confirm-only) and pause — the parallel decision is sender=user, so the
+        # orchestrator never writes it and --auto-decision is NOT honored.
+        # Gate on --auto-relay (PR #95 codex P3): a plain `step` probe must pause,
+        # not produce a draft.
+        [ "$auto_relay" = "true" ] || { _emit_step "paused" "parallel decision turn — pass --auto-relay to emit synthesis + decision draft"; exit 0; }
+        # DEC-029 convergence (정밀화 PR): if BOTH reviewers came back clean
+        # (_effective_responses_all_zero), there is nothing to disposition — surface
+        # an explicit `converged` close-draft (next_action close, empty decisions)
+        # instead of a generic empty synthesis. It stays confirm-only (sender=user,
+        # NOT helper-written) because DEC-047 reserves the parallel decision for the
+        # user; the user confirms the close. A single clean response does NOT trigger
+        # this (the helper falls through to the normal synthesis over the union).
+        if _effective_responses_all_zero "$sid"; then
+          _emit_convergence_close_draft "$sid"; exit 0
+        fi
+        _emit_parallel_synthesis "$sid"; exit 0
+      fi
       [ "$auto_decision" = "true" ] || { _emit_step "paused" "decision turn — needs --auto-decision or user disposition"; exit 0; }
       ;;
     request)
@@ -861,19 +1253,29 @@ cmd_step() {
     *) _emit_step "paused" "no actionable turn (next_kind=$next_kind)"; exit 0 ;;
   esac
 
+  # parallel_review can have BOTH agents pending a response (next_actor reports
+  # "multiple"); author the first pending agent's response this step (the next
+  # step authors the other). For every other turn the actor is unambiguous.
+  local author_actor="$next_actor"
+  if [ "$dmode" = "parallel_review" ] && [ "$next_kind" = "response" ]; then
+    author_actor="$next_actors0"
+  fi
+
   if [ "$dry" = "true" ]; then
-    _emit_step "dry_run" "would author $next_kind via $next_actor"; exit 0
+    _emit_step "dry_run" "would author $next_kind via $author_actor"; exit 0
   fi
 
   # Author the turn via the actor's CLI subprocess (sandbox + guarded timeout +
   # stdin-file prompt), then persist EXCLUSIVELY through the helper.
   local body_path rc=0
-  body_path="$(_author_turn "$sid" "$next_actor" "$next_kind" "$instructions")" || rc=$?
+  body_path="$(_author_turn "$sid" "$author_actor" "$next_kind" "$instructions")" || rc=$?
   if [ "$rc" -eq 6 ]; then
     _emit_step "no_sandbox" "no OS sandbox available — refusing to author a real turn without the mutation boundary (set RELAY_SANDBOX appropriately / install sandbox-exec|bwrap)"; exit 6
   fi
   if [ "$rc" -ne 0 ]; then
-    _emit_step "author_failed" "$next_actor $next_kind subprocess failed (rc=$rc: timeout/sandbox/bad-output)"; exit 4
+    local _diag="" _diag_file="$SESSIONS_DIR/$sid/.relay/last_author_error"
+    [ -f "$_diag_file" ] && _diag=" — $(cat "$_diag_file")"
+    _emit_step "author_failed" "$author_actor $next_kind subprocess failed (rc=$rc: timeout/sandbox/bad-output)$_diag"; exit 4
   fi
 
   # For agent-authored decisions/requests, the delegation contract requires
@@ -885,7 +1287,7 @@ cmd_step() {
   fi
 
   local write_rc=0
-  _helper write --session "$sid" --kind "$next_kind" --sender "$next_actor" \
+  _helper write --session "$sid" --kind "$next_kind" --sender "$author_actor" \
     --body-file "$body_path" >/dev/null 2>"$body_path.err" || write_rc=$?
   if [ "$write_rc" -ne 0 ]; then
     _emit_step "helper_rejected" "$(head -1 "$body_path.err" 2>/dev/null)"; rm -f "$body_path" "$body_path.err"; exit 5
@@ -897,9 +1299,73 @@ cmd_step() {
   local na; na="$(jq -r '.next_actor' <<<"$next")"
   local term; term="$(jq -r '.terminal' <<<"$next")"
   if [ "$term" = "true" ]; then
-    _emit_step "authored_terminal" "wrote $next_kind by $next_actor; session now terminal"
+    _emit_step "authored_terminal" "wrote $next_kind by $author_actor; session now terminal"
   else
-    _emit_step "authored" "wrote $next_kind by $next_actor; next: $na/$nk"
+    _emit_step "authored" "wrote $next_kind by $author_actor; next: $na/$nk"
+  fi
+}
+
+# --- status panel (XAR-1Bb.3) -----------------------------------------------
+# Surfaces the DEC-029 4-way OR termination state + counters + next turn so a
+# driver (or the user) can see how close the cycle is to a cap. Read-only.
+cmd_status() {
+  local sid="" json="false"
+  while (($#)); do case "$1" in
+    --session) sid="$2"; shift 2 ;;
+    --json) json="true"; shift ;;
+    *) die 2 "status: unknown arg: $1" ;;
+  esac; done
+  [ -n "$sid" ] || die 2 "status: --session required"
+  _validate_sid "$sid"
+
+  local obs; obs="$(_whose_turn "$sid")" || die 3 "status: session not found: $sid"
+  local dmode terminal next_actor next_kind latest_na
+  dmode="$(jq -r '.dialogue_mode' <<<"$obs")"
+  terminal="$(jq -r '.terminal' <<<"$obs")"
+  next_actor="$(jq -r '.next_actor' <<<"$obs")"
+  next_kind="$(jq -r '.next_kind' <<<"$obs")"
+  latest_na="$(jq -r '.latest_protocol.next_action // ""' <<<"$obs")"
+
+  # rounds = conversational progress (EXCLUDES superseded decisions); messages =
+  # raw flood pressure (INCLUDES superseded churn) — same counters the step gate
+  # uses, so the panel can never disagree with the runner (dogfood F1).
+  local rounds messages
+  rounds="$(_round_count "$sid")"; messages="$(_message_count "$sid")"
+
+  # DEC-029 4-way OR — surface ALL four conditions:
+  local rounds_cap="false" messages_cap="false" closed="false" stopped="false"
+  local convergence="false" reason="active"
+  [ "$rounds" -ge "$RELAY_MAX_ROUNDS" ] && { rounds_cap="true"; reason="rounds_cap"; }
+  [ "$messages" -ge "$RELAY_MAX_MESSAGES" ] && { messages_cap="true"; reason="messages_cap"; }
+  # convergence (F3, 정밀화 PR): the round is COMPLETE (next is the decision turn,
+  # so every reviewer of the round has responded) AND every effective response has
+  # zero findings — "양쪽 finding 0" for parallel, the single reviewer for
+  # adversarial. Gating on the decision turn + the effective set (not just the
+  # latest message) stops a half-finished parallel round (one clean response, the
+  # other pending) or a prior round's clean response from reading as convergence.
+  if [ "$next_kind" = "decision" ] && _effective_responses_all_zero "$sid"; then convergence="true"; fi
+  [ -f "$SESSIONS_DIR/$sid/.stopped" ] && { stopped="true"; reason="user_stop"; }   # durable (F2)
+  if [ "$terminal" = "true" ]; then closed="true"; reason="closed"; fi
+  [ "$reason" = "active" ] && [ "$convergence" = "true" ] && reason="convergence"
+
+  if [ "$json" = "true" ]; then
+    jq -nc --arg sid "$sid" --arg dmode "$dmode" \
+      --argjson rounds "$rounds" --argjson maxr "$RELAY_MAX_ROUNDS" \
+      --argjson msgs "$messages" --argjson maxm "$RELAY_MAX_MESSAGES" \
+      --argjson term "$terminal" --arg na "$next_actor" --arg nk "$next_kind" \
+      --arg lna "$latest_na" --arg reason "$reason" \
+      --argjson rc "$rounds_cap" --argjson mc "$messages_cap" --argjson cl "$closed" \
+      --argjson st "$stopped" --argjson cv "$convergence" \
+      '{kind:"relay_status", session_id:$sid, dialogue_mode:$dmode,
+        rounds:$rounds, max_rounds:$maxr, messages:$msgs, max_messages:$maxm,
+        terminal:$term, next_actor:$na, next_kind:$nk, latest_next_action:$lna,
+        termination:{reason:$reason, rounds_cap:$rc, messages_cap:$mc, closed:$cl,
+          user_stopped:$st, convergence:$cv,
+          note:"DEC-029 4-way OR: rounds(progress, excl superseded) | messages(raw flood, incl superseded) | user-stop(.stopped durable) | convergence(decision turn + all effective responses 0 findings)"}}'
+  else
+    printf 'status %s [%s]\n  rounds: %s/%s (progress)   messages: %s/%s (raw flood)\n  next: %s/%s   terminal: %s   stopped: %s   convergence: %s   (%s)\n' \
+      "$sid" "$dmode" "$rounds" "$RELAY_MAX_ROUNDS" "$messages" "$RELAY_MAX_MESSAGES" \
+      "$next_actor" "$next_kind" "$terminal" "$stopped" "$convergence" "$reason"
   fi
 }
 
@@ -927,6 +1393,7 @@ main() {
   case "$sub" in
     capabilities) cmd_capabilities "$@" ;;
     step)         cmd_step "$@" ;;
+    status)       cmd_status "$@" ;;
     write-probe)  cmd_write_probe "$@" ;;
     -h|--help)    sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
     *) die 2 "unknown subcommand: $sub" ;;
