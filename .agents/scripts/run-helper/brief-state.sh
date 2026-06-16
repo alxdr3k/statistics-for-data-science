@@ -7,11 +7,11 @@ init_brief() {
   started_at="$(iso_now)"
   start_epoch="$(date -u +%s)"
   # init_brief starts (or restarts) a cycle, so it must seed state from
-  # the current workspace — ignoring any DEV_CYCLE_STATE_DIR carried over
+  # the current workspace — ignoring any RUN_STATE_DIR carried over
   # from a previous cycle. Subsequent helper calls in the same shell
   # session reuse the value init_brief exports below via ensure_state_dir.
   state_dir="$(fresh_state_dir)"
-  log="$state_dir/dev-cycle-briefs.md"
+  log="$state_dir/run-briefs.md"
   jsonl="$(brief_jsonl_file "$state_dir")"
   audit_jsonl="$(brief_audit_jsonl_file "$state_dir")"
   run_json="$(brief_run_json_file "$state_dir")"
@@ -32,12 +32,12 @@ init_brief() {
     > "$run_json" || return 1
   printf '%s\n' "$run_id" > "$run_id_file" || return 1
   printf '%s\n' "$start_epoch" > "$start_epoch_file" || return 1
-  shell_export DEV_CYCLE_STATE_DIR "$state_dir"
-  shell_export DEV_CYCLE_RUN_ID "$run_id"
-  shell_export DEV_CYCLE_BRIEF_LOG "$log"
-  shell_export DEV_CYCLE_BRIEF_JSONL "$jsonl"
-  shell_export DEV_CYCLE_AUDIT_JSONL "$audit_jsonl"
-  shell_export DEV_CYCLE_RUN_JSON "$run_json"
+  shell_export RUN_STATE_DIR "$state_dir"
+  shell_export RUN_RUN_ID "$run_id"
+  shell_export RUN_BRIEF_LOG "$log"
+  shell_export RUN_BRIEF_JSONL "$jsonl"
+  shell_export RUN_AUDIT_JSONL "$audit_jsonl"
+  shell_export RUN_RUN_JSON "$run_json"
 }
 
 validate_brief() {
@@ -52,14 +52,14 @@ brief_context() {
   state_dir="$(ensure_state_dir)"
   run_id_file="$(brief_run_id_file "$state_dir")"
   run_id=""
-  log="$state_dir/dev-cycle-briefs.md"
+  log="$state_dir/run-briefs.md"
 
   if [[ -f "$run_id_file" ]]; then
     run_id="$(sed -n '1p' "$run_id_file")"
   fi
 
   if ! validate_brief "$run_id" "$log"; then
-    echo "No valid dev-cycle brief state. Run init-brief at the start of this dev-cycle run." >&2
+    echo "No valid run brief state. Run init-brief at the start of this run." >&2
     return 1
   fi
 
@@ -77,7 +77,7 @@ validate_cycle_append() {
   if [[ "$cycle" =~ ^[0-9]+$ ]]; then
     if (( cycle == 1 )); then
       if grep -Eq '^(## Cycle |사이클 [0-9]+ 브리핑$)' "$log"; then
-        echo "Brief log already contains cycles; run init-brief to start a new dev-cycle run." >&2
+        echo "Brief log already contains cycles; run init-brief to start a new run." >&2
         return 1
       fi
     elif (( cycle > 1 )); then
@@ -127,7 +127,7 @@ validate_jsonl_append() {
 
   if (( cycle == 1 )); then
     if [[ -s "$jsonl" ]]; then
-      echo "Brief JSONL already contains cycles; run init-brief to start a new dev-cycle run." >&2
+      echo "Brief JSONL already contains cycles; run init-brief to start a new run." >&2
       return 1
     fi
   elif (( cycle > 1 )); then
@@ -435,7 +435,7 @@ audit_pass_json() {
       return 1
     }
     if [[ "$norm_input" != "$norm_existing" ]]; then
-      echo "Audit pass for after_cycle $after_cycle is already recorded with a different payload. Idempotent retry must replay the same input. To replace audit results, edit .dev-cycle/dev-cycle-audit-passes.jsonl directly or start a new run with init-brief." >&2
+      echo "Audit pass for after_cycle $after_cycle is already recorded with a different payload. Idempotent retry must replay the same input. To replace audit results, edit .run/run-audit-passes.jsonl directly or start a new run with init-brief." >&2
       rm -f "$input_file" "$record_file"
       return 1
     fi

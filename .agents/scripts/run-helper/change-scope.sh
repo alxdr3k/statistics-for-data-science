@@ -161,7 +161,7 @@ change_scope() {
     (lines($changed)) as $changed_files |
     {
       schema_version:1,
-      kind:"dev_cycle_change_scope",
+      kind:"run_change_scope",
       repo:{name:$repo, type:$repo_type},
       review_base:$review_base,
       range_form:(if $range_form == "" then null else $range_form end),
@@ -320,7 +320,7 @@ review_dossier() {
         else [] end)
     ) as $risk_triggers |
     $scope + {
-      kind:"dev_cycle_review_dossier",
+      kind:"run_review_dossier",
       review_dossier:{
         summary:{
           insertions:$insertions,

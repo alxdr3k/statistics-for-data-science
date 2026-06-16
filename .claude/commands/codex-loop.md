@@ -40,7 +40,7 @@ review-loop에서 pass payload를 받으면 다음 셋을 순서대로 확인하
 2. required checks가 모두 SUCCESS인가? 미완료/실패 항목이 있으면 `gh pr checks <PR_NUMBER> --watch`로 완료를 기다린다.
 3. baseline 이후 새 actionable comment/review가 없는가? (review-loop의 pass 신호 시점에는 0이어야 정상; 만약 그 사이 새로 도착했으면 review-loop을 한 번 더 재실행)
 
-확인이 모두 통과하면 `scripts/land-pr.sh`를 호출한다. caller cwd는 PR head branch를 잡고 있는 worktree일 수 있으므로 (dev-cycle Step 9의 일반 흐름), land-pr 호출은 두 단계로 나뉜다 — review cwd에서 식별자를 캡처한 다음 git context가 없는 safe cwd로 이동해서 호출.
+확인이 모두 통과하면 `scripts/land-pr.sh`를 호출한다. caller cwd는 PR head branch를 잡고 있는 worktree일 수 있으므로 (run Step 9의 일반 흐름), land-pr 호출은 두 단계로 나뉜다 — review cwd에서 식별자를 캡처한 다음 git context가 없는 safe cwd로 이동해서 호출.
 
 #### Why cwd split
 
@@ -80,7 +80,7 @@ PR_NUMBER_VALUE="$REVIEW_LOOP_PASS_PR_NUMBER"
 
 `REVIEW_LOOP_PASS_REPO` / `REVIEW_LOOP_PASS_PR_NUMBER` / `REVIEW_LOOP_HEAD_SHA`는 모두 review-loop pass payload (`kind:"review_loop_pass_signal"`)의 `repo` / `pr_number` / `head_sha` 필드와 1:1 대응한다. 별도 변수명을 쓰는 이유는 (a) bash snippet에서 어디서 왔는지 명확히 하기 위함, (b) caller가 직접 변수에 담을지 jq로 직접 추출할지 선택할 수 있게 하기 위함이다.
 
-caller cwd는 서브셸로 격리되므로 land-pr이 끝난 뒤에도 그대로 유지된다. dev-cycle 같은 후속 cleanup (linked task worktree 제거, base branch sync 등) 은 caller가 자기 cwd 기준으로 이어서 처리한다.
+caller cwd는 서브셸로 격리되므로 land-pr이 끝난 뒤에도 그대로 유지된다. run 같은 후속 cleanup (linked task worktree 제거, base branch sync 등) 은 caller가 자기 cwd 기준으로 이어서 처리한다.
 
 #### land-pr 동작
 

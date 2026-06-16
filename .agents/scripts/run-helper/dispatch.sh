@@ -2,7 +2,7 @@
 
 usage() {
   cat <<'EOF'
-usage: dev-cycle-helper.sh <command>
+usage: run-helper.sh <command>
 
 commands:
   repo-name
@@ -26,7 +26,7 @@ commands:
 EOF
 }
 
-dev_cycle_helper_main() {
+run_helper_main() {
   local cmd
   cmd="${1:-}"
   case "$cmd" in

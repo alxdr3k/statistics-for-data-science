@@ -24,10 +24,14 @@ Before launching Codex, decide whether the handoff is worth it.
 
 Claude Code handles the work directly when it is:
 
+- frontend work: UI, styling, components, client-side state, browser interaction, responsive layout, visual QA, or accessibility
 - 1-2 files, local, mechanical, or low ambiguity
 - docs wording, typo fixes, config tweaks, small bug fixes, or simple refactors
 - mostly search/edit/test
 - faster to do than to write a precise Codex handoff prompt
+
+Do not delegate frontend work to Codex, even when it is broad, ambiguous, design-heavy, or explicitly involves multiple files.
+Claude Code owns frontend implementation and frontend QA directly. This frontend rule has priority over the Codex criteria below.
 
 Use Codex only when the work is:
 
@@ -138,6 +142,7 @@ Do not paste large context by default. Include paths and focused excerpts unless
 Do not ask the user whether Codex should run foreground or background. Choose the lane:
 
 - small/simple: Claude Code direct
+- frontend: Claude Code direct
 - substantial/ambiguous: managed Codex background job
 
 After Codex completes, Claude Code reviews the result before applying, landing, or declaring the work done.

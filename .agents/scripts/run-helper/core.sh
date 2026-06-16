@@ -2,8 +2,8 @@
 
 script_dir() {
   local source dir
-  if [[ -n "${DEV_CYCLE_HELPER_SCRIPT_DIR:-}" ]]; then
-    printf '%s\n' "$DEV_CYCLE_HELPER_SCRIPT_DIR"
+  if [[ -n "${RUN_HELPER_SCRIPT_DIR:-}" ]]; then
+    printf '%s\n' "$RUN_HELPER_SCRIPT_DIR"
     return
   fi
 
@@ -38,7 +38,7 @@ repo_name() {
 
 repo_type() {
   # Per PR #28 every repo uses the standard PR-based workflow. The function
-  # is retained because dev-cycle briefs record `repo.type` in their schema;
+  # is retained because run briefs record `repo.type` in their schema;
   # callers see a single value rather than a missing field.
   echo "standard"
 }
@@ -86,7 +86,7 @@ sync_repo() {
   git fetch origin
 
   if [[ -z "$current" ]]; then
-    echo "Detached HEAD: cannot run dev-cycle sync safely" >&2
+    echo "Detached HEAD: cannot run sync safely" >&2
     return 1
   fi
 
@@ -105,7 +105,7 @@ sync_repo() {
   fi
 }
 
-# 3-signal entry gate: refuse to start dev-cycle mutation in an unsafe cwd.
+# 3-signal entry gate: refuse to start run mutation in an unsafe cwd.
 # Codex pingpong session 20260527-044012 (option D sub-decision (a)) concluded
 # that a single branch-name check is insufficient — a canonical main checkout
 # temporarily holding a feature branch would false-pass. The gate combines:
@@ -122,9 +122,9 @@ mutation_entry_check() {
   local cwd_toplevel
   if ! cwd_toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     jq -nc --arg cwd "$(pwd)" '{
-      schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:false,
+      schema_version:1, kind:"run_mutation_entry_check", ok:false,
       reason:"not_in_git_tree",
-      hint:"dev-cycle mutation must run inside a git worktree.",
+      hint:"run mutation must run inside a git worktree.",
       cwd:$cwd
     }'
     return 2
@@ -163,7 +163,7 @@ mutation_entry_check() {
       --arg cwd "$cwd_toplevel" \
       --arg primary "$primary_worktree" \
       --arg branch "$current_branch" \
-      '{schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:false,
+      '{schema_version:1, kind:"run_mutation_entry_check", ok:false,
         reason:"primary_worktree",
         hint:"cwd is the primary worktree (canonical main checkout). Create a task worktree (`git worktree add ../<repo>-<branch> -b <branch> origin/<base>`) and cd into it before mutation.",
         cwd:$cwd, primary_worktree:$primary,
@@ -174,7 +174,7 @@ mutation_entry_check() {
   if [[ -z "$current_branch" ]]; then
     jq -nc \
       --arg cwd "$cwd_toplevel" \
-      '{schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:false,
+      '{schema_version:1, kind:"run_mutation_entry_check", ok:false,
         reason:"detached_head",
         hint:"cwd is on a detached HEAD. Create a working branch (`git checkout -b <branch>`) before mutation so commits attach to a named ref.",
         cwd:$cwd}'
@@ -185,7 +185,7 @@ mutation_entry_check() {
     jq -nc \
       --arg cwd "$cwd_toplevel" \
       --arg branch "$current_branch" \
-      '{schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:false,
+      '{schema_version:1, kind:"run_mutation_entry_check", ok:false,
         reason:"base_branch_undetermined",
         hint:"Could not discover the base branch (no origin/HEAD, no open PR for the current branch, no origin/dev). Set origin/HEAD (`git remote set-head origin --auto`) or open the PR against the intended base before retrying.",
         cwd:$cwd, current_branch:$branch}'
@@ -199,7 +199,7 @@ mutation_entry_check() {
       --arg branch "$current_branch" \
       --arg default "$default_discovered" \
       --arg review "$review_discovered" \
-      '{schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:false,
+      '{schema_version:1, kind:"run_mutation_entry_check", ok:false,
         reason:"branch_is_base",
         hint:"current branch is the base branch. Create or switch to a working branch (`codex/<task>` or `<type>/<task>`) before mutation.",
         cwd:$cwd, current_branch:$branch,
@@ -214,14 +214,14 @@ mutation_entry_check() {
     --arg default "$default_discovered" \
     --arg review "$review_discovered" \
     --arg primary "$primary_worktree" \
-    '{schema_version:1, kind:"dev_cycle_mutation_entry_check", ok:true,
+    '{schema_version:1, kind:"run_mutation_entry_check", ok:true,
       cwd:$cwd, current_branch:$branch,
       default_branch:(if $default == "" then null else $default end),
       review_base:(if $review == "" then null else $review end),
       primary_worktree:(if $primary == "" then null else $primary end)}'
 }
 
-# Compute the workspace-local .dev-cycle from cwd, always. Used by
+# Compute the workspace-local .run from cwd, always. Used by
 # init_brief, which must create / overwrite the state at the location
 # the operator is currently in, regardless of stale env vars from a
 # previous cycle in the same shell.
@@ -229,32 +229,74 @@ fresh_state_dir() {
   local root git_dir state_dir exclude_file
   root="$(repo_root)" || return 1
   git_dir="$(git rev-parse --git-dir)" || return 1
-  state_dir="$root/.dev-cycle"
+  state_dir="$root/.run"
   exclude_file="$git_dir/info/exclude"
   mkdir -p "$state_dir"
   if [[ -f "$exclude_file" ]]; then
-    grep -qxF ".dev-cycle/" "$exclude_file" 2>/dev/null || echo ".dev-cycle/" >> "$exclude_file"
+    grep -qxF ".run/" "$exclude_file" 2>/dev/null || echo ".run/" >> "$exclude_file"
   fi
   echo "$state_dir"
 }
 
+# DEC-049: adopt a legacy dev-cycle state dir ($1) into the new .run name ($2),
+# renaming the brief filenames (dev-cycle-run-id → run-id, …) so the renamed helper
+# finds them, and gitignoring the adopted .run/ (P3-A) so diff classifiers skip the
+# migrated state. Returns 1 on mv failure. Caller checks preconditions ($1 exists,
+# $2 absent) and owns user-facing messaging.
+adopt_legacy_state_dir() {
+  local legacy="$1" new="$2" f b nb git_dir
+  mv "$legacy" "$new" 2>/dev/null || return 1
+  for f in "$new"/dev-cycle-*; do
+    [[ -e "$f" ]] || continue
+    b="$(basename "$f")"
+    case "$b" in
+      dev-cycle-run-id)             nb="run-id" ;;
+      dev-cycle-run.json)           nb="run.json" ;;
+      dev-cycle-start-epoch)        nb="run-start-epoch" ;;
+      dev-cycle-briefs.jsonl)       nb="run-briefs.jsonl" ;;
+      dev-cycle-briefs.md)          nb="run-briefs.md" ;;
+      dev-cycle-audit-passes.jsonl) nb="run-audit-passes.jsonl" ;;
+      *)                            nb="run-${b#dev-cycle-}" ;;
+    esac
+    mv "$f" "$new/$nb" 2>/dev/null || true
+  done
+  : > "$new/.adopted-from-dev-cycle" 2>/dev/null || true
+  git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
+  if [[ -n "$git_dir" && -f "$git_dir/info/exclude" ]]; then
+    grep -qxF ".run/" "$git_dir/info/exclude" 2>/dev/null || echo ".run/" >> "$git_dir/info/exclude"
+  fi
+  return 0
+}
+
 ensure_state_dir() {
-  # DEV_CYCLE_STATE_DIR opt-in: pin the state directory to an absolute
+  # RUN_STATE_DIR opt-in: pin the state directory to an absolute
   # path so cycle state survives a cwd change into a linked worktree.
   # init_brief exports the variable; subsequent helper calls in the
   # same shell session (or any child shell that inherits the env) see
-  # the same .dev-cycle regardless of which worktree they run from.
+  # the same .run regardless of which worktree they run from.
   # Without this, `git rev-parse --show-toplevel` resolves to the
   # cwd's worktree root and a linked worktree gets a brand-new empty
   # state directory, breaking finish-cycle-json / summary-json after
   # Step 4 (worktree creation).
-  if [[ -n "${DEV_CYCLE_STATE_DIR:-}" ]]; then
-    if [[ ! -d "$DEV_CYCLE_STATE_DIR" ]]; then
-      echo "DEV_CYCLE_STATE_DIR=$DEV_CYCLE_STATE_DIR does not exist; run init-brief first or unset the variable." >&2
+  if [[ -n "${RUN_STATE_DIR:-}" ]]; then
+    if [[ ! -d "$RUN_STATE_DIR" ]]; then
+      echo "RUN_STATE_DIR=$RUN_STATE_DIR does not exist; run init-brief first or unset the variable." >&2
       return 1
     fi
-    echo "$DEV_CYCLE_STATE_DIR"
+    echo "$RUN_STATE_DIR"
     return 0
+  fi
+  # P2-A (DEC-049): a pre-rename run pinned by DEV_CYCLE_STATE_DIR points at a
+  # <orig>/.dev-cycle dir, possibly in a different worktree. Adopt it into the
+  # sibling <orig>/.run and use that, so a resumed in-flight run finds its brief
+  # state instead of a fresh empty .run in the current worktree.
+  if [[ -n "${DEV_CYCLE_STATE_DIR:-}" ]]; then
+    local pin="$DEV_CYCLE_STATE_DIR" sib="${DEV_CYCLE_STATE_DIR%.dev-cycle}.run"
+    if [[ "$pin" == *.dev-cycle && -d "$pin" && ! -e "$sib" ]]; then
+      adopt_legacy_state_dir "$pin" "$sib" && { echo "$sib"; return 0; }
+    elif [[ -d "$sib" ]]; then
+      echo "$sib"; return 0
+    fi
   fi
   fresh_state_dir
 }
@@ -266,12 +308,12 @@ shell_export() {
 
 brief_run_id_file() {
   local state_dir="$1"
-  printf '%s\n' "$state_dir/dev-cycle-run-id"
+  printf '%s\n' "$state_dir/run-id"
 }
 
 brief_start_epoch_file() {
   local state_dir="$1"
-  printf '%s\n' "$state_dir/dev-cycle-start-epoch"
+  printf '%s\n' "$state_dir/run-start-epoch"
 }
 
 format_duration() {
@@ -296,29 +338,29 @@ iso_now() {
 
 require_jq() {
   if ! command -v jq >/dev/null 2>&1; then
-    echo "jq is required for dev-cycle JSON brief handling" >&2
+    echo "jq is required for run JSON brief handling" >&2
     return 1
   fi
 }
 
 brief_jsonl_file() {
   local state_dir="$1"
-  printf '%s\n' "$state_dir/dev-cycle-briefs.jsonl"
+  printf '%s\n' "$state_dir/run-briefs.jsonl"
 }
 
 brief_run_json_file() {
   local state_dir="$1"
-  printf '%s\n' "$state_dir/dev-cycle-run.json"
+  printf '%s\n' "$state_dir/run.json"
 }
 
 brief_audit_jsonl_file() {
   local state_dir="$1"
-  printf '%s\n' "$state_dir/dev-cycle-audit-passes.jsonl"
+  printf '%s\n' "$state_dir/run-audit-passes.jsonl"
 }
 
 # --- PA-1.3 brief preservation -------------------------------------------
 #
-# Workspace `.dev-cycle/` lives inside the worktree and is erased by
+# Workspace `.run/` lives inside the worktree and is erased by
 # `git worktree remove`. PA-1.0 dogfood (PR #13 closeout) observed the
 # brief log going dark immediately after cleanup, making post-mortem
 # review impossible. PA-1.3 mirrors the live brief log to a central
@@ -326,20 +368,20 @@ brief_audit_jsonl_file() {
 #
 # The workspace path remains source of truth for live writes; the
 # central path is a mirror updated at cycle close (finish_cycle_json)
-# and on demand via `dev-cycle-helper.sh mirror-brief`. Source of truth
+# and on demand via `run-helper.sh mirror-brief`. Source of truth
 # during a live cycle is still the workspace; only after cycle close
 # does the central copy become useful.
 
 central_brief_root() {
-  # `${DEV_CYCLE_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/dev-cycle}/briefs/`
+  # `${RUN_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/run}/briefs/`
   # Aligned with PA-1.1 run-registry state root for consistency.
   local home
-  if [[ -n "${DEV_CYCLE_STATE_HOME:-}" ]]; then
-    home="$DEV_CYCLE_STATE_HOME"
+  if [[ -n "${RUN_STATE_HOME:-}" ]]; then
+    home="$RUN_STATE_HOME"
   elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
-    home="$XDG_STATE_HOME/dev-cycle"
+    home="$XDG_STATE_HOME/run"
   else
-    home="$HOME/.local/state/dev-cycle"
+    home="$HOME/.local/state/run"
   fi
   printf '%s/briefs\n' "$home"
 }
@@ -391,9 +433,9 @@ mirror_brief_to_central() {
   central="$(central_brief_dir_for_run "$run_id")" || return 0
   mkdir -p "$central" || return 1
   local f
-  for f in dev-cycle-run-id dev-cycle-start-epoch dev-cycle-run.json \
-           dev-cycle-briefs.jsonl dev-cycle-briefs.md \
-           dev-cycle-audit-passes.jsonl; do
+  for f in run-id run-start-epoch run.json \
+           run-briefs.jsonl run-briefs.md \
+           run-audit-passes.jsonl; do
     if [[ -f "$state_dir/$f" ]]; then
       # Atomic-ish replace: write to .tmp then mv. cp -p preserves
       # timestamps so consumers see the live workspace mtime.

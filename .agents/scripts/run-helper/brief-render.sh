@@ -144,7 +144,7 @@ finish_cycle_json_file() {
     optional_change_scope and
     optional_verification_plan
   ' "$input_file" >/dev/null; then
-    echo "Invalid dev-cycle brief JSON. Required: schema_version=1, integer cycle, result, non-empty actions[].summary_ko, conclusion.summary_ko, non-empty verification[].summary_ko, review_land/review_ship summary/status, risks[].summary_ko when risks are present. Optional candidate/promotion arrays must contain items with summary_ko, summary, or id; optional change_scope and verification_plan must be objects with kind/profile." >&2
+    echo "Invalid run brief JSON. Required: schema_version=1, integer cycle, result, non-empty actions[].summary_ko, conclusion.summary_ko, non-empty verification[].summary_ko, review_land/review_ship summary/status, risks[].summary_ko when risks are present. Optional candidate/promotion arrays must contain items with summary_ko, summary, or id; optional change_scope and verification_plan must be objects with kind/profile." >&2
     return 1
   fi
 
@@ -190,7 +190,7 @@ finish_cycle_json_file() {
       return 1
     }
     summary="$(jq -r '
-      (.risks[0].summary_ko // .risks[0].summary // "dev-cycle risk")
+      (.risks[0].summary_ko // .risks[0].summary // "run risk")
       | tostring
       | split("\n")[0]
       | if length > 90 then .[0:90] else . end
@@ -198,7 +198,7 @@ finish_cycle_json_file() {
       rm -f "$record_file"
       return 1
     }
-    title="[dev-cycle risk] $summary"
+    title="[run risk] $summary"
     issue_err="$(mktemp)" || {
       rm -f "$record_file"
       return 1
@@ -286,16 +286,16 @@ finish_cycle_json() {
 
 finish_cycle() {
   local cycle result work verification review_ship risk next_action payload_file status
-  cycle="${DEV_CYCLE_CYCLE:?set DEV_CYCLE_CYCLE}"
-  result="${DEV_CYCLE_RESULT:?set DEV_CYCLE_RESULT}"
-  work="${DEV_CYCLE_WORK:?set DEV_CYCLE_WORK}"
-  verification="${DEV_CYCLE_VERIFICATION:?set DEV_CYCLE_VERIFICATION}"
-  review_ship="${DEV_CYCLE_REVIEW_SHIP:?set DEV_CYCLE_REVIEW_SHIP}"
-  risk="${DEV_CYCLE_RISK:-없음}"
-  next_action="${DEV_CYCLE_NEXT_ACTION:-기록된 리스크를 다음 cycle에서 triage합니다.}"
+  cycle="${RUN_CYCLE:?set RUN_CYCLE}"
+  result="${RUN_RESULT:?set RUN_RESULT}"
+  work="${RUN_WORK:?set RUN_WORK}"
+  verification="${RUN_VERIFICATION:?set RUN_VERIFICATION}"
+  review_ship="${RUN_REVIEW_SHIP:?set RUN_REVIEW_SHIP}"
+  risk="${RUN_RISK:-없음}"
+  next_action="${RUN_NEXT_ACTION:-기록된 리스크를 다음 cycle에서 triage합니다.}"
 
   if [[ ! "$cycle" =~ ^[0-9]+$ ]]; then
-    echo "DEV_CYCLE_CYCLE must be numeric for JSON brief handling" >&2
+    echo "RUN_CYCLE must be numeric for JSON brief handling" >&2
     return 1
   fi
 

@@ -18,11 +18,11 @@
 #   gc           [--repo <identity>]
 #
 # Env vars:
-#   DEV_CYCLE_STATE_HOME       override registry root parent (XDG_STATE_HOME or
+#   RUN_STATE_HOME       override registry root parent (XDG_STATE_HOME or
 #                              $HOME/.local/state by default)
-#   DEV_CYCLE_HEARTBEAT_INTERVAL  default 30 seconds
-#   DEV_CYCLE_HEARTBEAT_TTL       default 300 seconds
-#   DEV_CYCLE_LOCK_RECLAIM_GRACE  default 60 seconds
+#   RUN_HEARTBEAT_INTERVAL  default 30 seconds
+#   RUN_HEARTBEAT_TTL       default 300 seconds
+#   RUN_LOCK_RECLAIM_GRACE  default 60 seconds
 #
 # Exit codes:
 #   0  success
@@ -37,7 +37,7 @@
 #            -> write owner.tmp.<pid> JSON -> rename to owner.json.
 #   release: rm owner.json + rm .creator.* + rmdir.
 #   stale (design doc §6): owner.json absent AND creator pid dead/absent
-#            AND lock_path mtime > DEV_CYCLE_LOCK_RECLAIM_GRACE.
+#            AND lock_path mtime > RUN_LOCK_RECLAIM_GRACE.
 #            Salvage via atomic-rename of the lock directory.
 
 set -euo pipefail
@@ -46,9 +46,26 @@ umask 077
 # --- Env / defaults --------------------------------------------------------
 
 state_home_default() {
+  if [[ -n "${RUN_STATE_HOME:-}" ]]; then
+    printf '%s\n' "$RUN_STATE_HOME"
+    return
+  fi
+  if [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    printf '%s/run\n' "$XDG_STATE_HOME"
+  else
+    printf '%s/.local/state/run\n' "$HOME"
+  fi
+}
+
+# Legacy state home (pre-DEC-049 `dev-cycle` naming) for transition dual-read.
+# Mirrors the OLD resolution order: an explicit DEV_CYCLE_STATE_HOME wins (a run
+# started under that override lives there), then XDG_STATE_HOME/dev-cycle, then
+# $HOME/.local/state/dev-cycle. Independent of RUN_STATE_HOME — the new-tree home
+# being explicit does not mean the legacy run wasn't under a custom dev-cycle home.
+legacy_state_home() {
   if [[ -n "${DEV_CYCLE_STATE_HOME:-}" ]]; then
     printf '%s\n' "$DEV_CYCLE_STATE_HOME"
-    return
+    return 0
   fi
   if [[ -n "${XDG_STATE_HOME:-}" ]]; then
     printf '%s/dev-cycle\n' "$XDG_STATE_HOME"
@@ -57,9 +74,9 @@ state_home_default() {
   fi
 }
 
-HEARTBEAT_INTERVAL="${DEV_CYCLE_HEARTBEAT_INTERVAL:-30}"
-HEARTBEAT_TTL="${DEV_CYCLE_HEARTBEAT_TTL:-300}"
-LOCK_RECLAIM_GRACE="${DEV_CYCLE_LOCK_RECLAIM_GRACE:-60}"
+HEARTBEAT_INTERVAL="${RUN_HEARTBEAT_INTERVAL:-30}"
+HEARTBEAT_TTL="${RUN_HEARTBEAT_TTL:-300}"
+LOCK_RECLAIM_GRACE="${RUN_LOCK_RECLAIM_GRACE:-60}"
 
 # Numeric validation. These values are consumed in arithmetic contexts;
 # unvalidated text would either propagate as `unbound variable` under
@@ -72,9 +89,9 @@ _validate_positive_int() {
     exit 3
   fi
 }
-_validate_positive_int DEV_CYCLE_HEARTBEAT_INTERVAL "$HEARTBEAT_INTERVAL"
-_validate_positive_int DEV_CYCLE_HEARTBEAT_TTL      "$HEARTBEAT_TTL"
-_validate_positive_int DEV_CYCLE_LOCK_RECLAIM_GRACE "$LOCK_RECLAIM_GRACE"
+_validate_positive_int RUN_HEARTBEAT_INTERVAL "$HEARTBEAT_INTERVAL"
+_validate_positive_int RUN_HEARTBEAT_TTL      "$HEARTBEAT_TTL"
+_validate_positive_int RUN_LOCK_RECLAIM_GRACE "$LOCK_RECLAIM_GRACE"
 
 # --- Generic helpers -------------------------------------------------------
 
@@ -217,6 +234,18 @@ registry_root_for() {
   local key
   key="$(repo_dir_key "$identity")"
   printf '%s/registry/%s\n' "$(state_home_default)" "$key"
+}
+
+# legacy_registry_root_for <repo_identity>
+# Stdout: absolute path to the legacy ${dev-cycle home}/registry/<key>/, or empty
+# when there is no legacy home (RUN_STATE_HOME set) or no identity. DEC-049 #1.
+legacy_registry_root_for() {
+  local identity="$1" home key
+  home="$(legacy_state_home)"
+  [[ -n "$home" ]] || return 0
+  [[ -z "$identity" ]] && return 0
+  key="$(repo_dir_key "$identity")"
+  printf '%s/registry/%s\n' "$home" "$key"
 }
 
 # ensure_repo_manifest <registry_root> <identity> <original_url>
@@ -431,6 +460,34 @@ cmd_identity() {
   printf '%s\n' "$identity"
 }
 
+# entry_is_stale <entry-path> [legacy_dead_pid_only]
+# Returns 0 if the active entry is stale. Dead owner pid is always stale. An
+# expired heartbeat is stale ONLY when the second arg is empty — for legacy
+# entries (second arg non-empty) a live pid with an old heartbeat is NOT stale,
+# because the pre-rename helper had no background heartbeat loop (introduced by
+# DEC-049) so its last_heartbeat_at is always old; treating that as stale would
+# let a still-running legacy run be ignored and a second /run register (P2:479).
+# DEC-049 #1 P2-B / P2:479.
+entry_is_stale() {
+  local entry="$1" legacy_dead_pid_only="${2:-}" status pid last now_e last_e age
+  status="$(jq -r .status "$entry" 2>/dev/null || echo "")"
+  [[ "$status" == "active" ]] || return 1
+  pid="$(jq -r .pid "$entry" 2>/dev/null || echo "0")"
+  if [[ "$pid" != "0" ]] && ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  # legacy entries: only a dead pid marks them stale (heartbeat contract differs).
+  [[ -n "$legacy_dead_pid_only" ]] && return 1
+  last="$(jq -r .last_heartbeat_at "$entry" 2>/dev/null || echo "")"
+  if [[ -n "$last" ]]; then
+    now_e="$(date +%s)"
+    last_e="$(_iso_to_epoch "$last")"
+    age=$((now_e - last_e))
+    (( age >= HEARTBEAT_TTL )) && return 0
+  fi
+  return 1
+}
+
 # list_active_runs_for_repo <root> <identity>
 # stdout: JSON array of active entries (status == "active") for the logical
 # repo at $identity. Used by the PA-1.1c register collision gate and by
@@ -439,15 +496,27 @@ cmd_identity() {
 list_active_runs_for_repo() {
   local root="$1" identity="$2"
   local entries=()
-  if [[ -d "$root/runs" ]]; then
+  local scan_root legacy_root
+  legacy_root="$(legacy_registry_root_for "$identity")"
+  # 새 root + (transition) legacy dev-cycle root 둘 다 스캔한다 (DEC-049 #1).
+  # 전환기에 구 `${…}/dev-cycle/registry`에 active run이 남아 있으면 register
+  # collision gate가 그것을 보게 한다. legacy entry는 새 helper의 gc/release가
+  # 닿지 못하므로, stale(pid 사망 / heartbeat 만료)인 legacy entry는 collision
+  # 판정에서 제외해 crashed pre-rename run이 모든 /run을 영구 차단하지 않게 한다
+  # (P2-B). live legacy entry는 그대로 collision으로 남는다(구 도구로 release).
+  for scan_root in "$root" "$legacy_root"; do
+    [[ -n "$scan_root" && -d "$scan_root/runs" ]] || continue
     while IFS= read -r entry; do
       local id status
       id="$(jq -r .repo_identity "$entry" 2>/dev/null || echo "")"
       status="$(jq -r .status "$entry" 2>/dev/null || echo "")"
       [[ "$id" == "$identity" && "$status" == "active" ]] || continue
+      if [[ "$scan_root" == "$legacy_root" ]] && entry_is_stale "$entry" legacy; then
+        continue
+      fi
       entries+=("$entry")
-    done < <(find "$root/runs" -maxdepth 1 -name '*.json' 2>/dev/null | sort)
-  fi
+    done < <(find "$scan_root/runs" -maxdepth 1 -name '*.json' 2>/dev/null | sort)
+  done
   if (( ${#entries[@]} == 0 )); then
     printf '[]\n'
   else
