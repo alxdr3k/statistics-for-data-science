@@ -71,38 +71,23 @@ Do not fall back to a timed run.
 
 ## Managed Lifecycle
 
-Codex work must run as a managed background job. The launcher must return quickly after starting Codex.
-The long-running Codex process must not be the direct child of a Claude Code Bash call that stays open until Codex finishes.
+Codex work must run async: the launcher returns quickly and no wall-clock timeout can kill Codex.
 
-Record job state before reporting launch:
-
-- job id
-- cwd
-- prompt or request file
-- pid
-- log file
-- result file
-- exit marker path
-- start time
-
-Default state root:
+**Default — harness-tracked background.** Write the prompt to a file (never on argv — DEC-048), then wrap a *foreground* companion call in `Bash(run_in_background)`:
 
 ```bash
-~/.claude/codex-managed/<repo-slug>/jobs/<job-id>/
+Bash(run_in_background):  node codex-companion.mjs task --cwd <worktree> --write < <prompt-file>
 ```
 
-Use repo-local state only when the target repo is trusted and writable, and only after adding `.codex-managed/`
-to `.git/info/exclude` before creating any job files:
+The harness tracks the job, auto-notifies the session on exit, and preserves exit code + output — so there is no manual job state to record and no supervision poller to run (DEC-051). Keep the companion in *foreground* mode (not `--background`) so its safety wrapper — sandbox, redaction, provenance, output capture — still applies; do not substitute a raw `codex exec`. Pass the prompt via a finite stdin file (`< prompt.txt`) or `--prompt-file` — **never as a `--write "<prompt>"` argv string** (DEC-048: argv leakage / context blowup); a finite stdin file also avoids the codex stdin-hang. Never wrap Codex in a foreground or timed Bash call (see Hard Rule).
 
-```bash
-.codex-managed/jobs/<job-id>/
-```
-
-If the exclude cannot be verified, use the default user-local state root.
+**Escape hatch (rare).** Only for an in-flight job that must keep running after the Claude Code session is *fully closed* — a non-goal for normal interactive `/work`. harness-bg already survives turns, context compaction, and long runs (verified: a 32-min harness-bg job ran to completion with all heartbeats + exit code + auto-notification intact), so neither long duration, result durability (write output to a durable file/registry — harness-bg can do this), nor codex thread resume (`--resume-last`, disk-persisted, works with harness-bg) is a reason to detach. If you genuinely need session-close survival, detach via companion `--background`. That leaves harness tracking, so the global AGENTS.md "백그라운드 작업 completion 수신 보장 (backstop poller)" rules apply: record job state (id / cwd / pid / log / result / exit-marker) under `~/.claude/codex-managed/<repo-slug>/jobs/<job-id>/` (or repo-local `.codex-managed/` only if gitignored), then supervise per the next section.
 
 ## Supervision
 
-Claude Code owns lifecycle supervision. Poll independent signals:
+This section applies to the **detached managed-job fallback only**. Harness-tracked background jobs (the default) need no manual supervision — the harness re-invokes the session on completion with the exit code, so there is no self-reported status to distrust.
+
+For a detached job, Claude Code owns lifecycle supervision. Poll independent signals:
 
 - pid liveness: `kill -0 <pid>`
 - progress: log/result file mtime
@@ -143,6 +128,6 @@ Do not ask the user whether Codex should run foreground or background. Choose th
 
 - small/simple: Claude Code direct
 - frontend: Claude Code direct
-- substantial/ambiguous: managed Codex background job
+- substantial/ambiguous: harness-tracked background Codex job (companion foreground wrapped in `Bash(run_in_background)`; detached `--background` only for the rare must-outlive-session-close case)
 
 After Codex completes, Claude Code reviews the result before applying, landing, or declaring the work done.

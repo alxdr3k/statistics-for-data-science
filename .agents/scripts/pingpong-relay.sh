@@ -28,9 +28,13 @@
 # state directly.
 #
 # Subcommands:
-#   capabilities --session <id> [--auto-relay] [--auto-decision] [--json]
-#   step         --session <id> [--auto-relay] [--auto-decision]
+#   capabilities --session <id> [--manual] [--auto-decision] [--json]
+#   step         --session <id> [--manual] [--auto-decision]
 #                [--instructions-file <path>] [--json] [--dry-run]
+#
+# auto-relay is the DEFAULT (DEC-054): a bare `step` collects/relays the turn.
+# Pass --manual (alias --no-auto-relay) to opt out to per-turn pausing.
+# --auto-relay is still accepted as a backward-compat no-op.
 #
 # Exit codes (step):
 #   0  step completed OR cleanly paused/terminal (see emitted JSON `status`)
@@ -694,10 +698,13 @@ JSON
 
 # --- subcommands -------------------------------------------------------------
 cmd_capabilities() {
-  local sid="" auto_relay="false" auto_decision="false" json="false"
+  # XAR-1Bb.6 (DEC-054): auto-relay default-on; --manual (alias --no-auto-relay)
+  # reports the opted-out capability set.
+  local sid="" auto_relay="true" auto_decision="false" json="false"
   while (($#)); do case "$1" in
     --session) sid="$2"; shift 2 ;;
-    --auto-relay) auto_relay="true"; shift ;;
+    --auto-relay) shift ;;  # no-op: auto-relay is the default (DEC-054); kept for backward compat
+    --manual|--no-auto-relay) auto_relay="false"; shift ;;  # explicit opt-out always wins, order-independent
     --auto-decision) auto_decision="true"; shift ;;
     --json) json="true"; shift ;;
     *) die 2 "capabilities: unknown arg: $1" ;;
@@ -707,7 +714,12 @@ cmd_capabilities() {
   local dmode; dmode="$(jq -r '.dialogue_mode' <<<"$obs")"
   local sbx; sbx="$(_sandbox_available)"
   local caps
-  if [ "$dmode" = "parallel_review" ]; then
+  if [ "$auto_relay" != "true" ]; then
+    # DEC-054: --manual opt-out — report the per-turn pause mode so the caps
+    # text never contradicts auto_relay=false (R-F2).
+    caps="manual (per-turn pause; auto-relay off — driver advances each turn)"
+    [ "$auto_decision" = "true" ] && caps="$caps; --auto-decision set"
+  elif [ "$dmode" = "parallel_review" ]; then
     # DEC-047: parallel auto = auto-relay (collect both responses) + synthesis
     # (orchestrator-only) + decision DRAFT. The final disposition stays
     # user-required (decision sender=user, DEC-043/Q-052) — --auto-decision is
@@ -1121,12 +1133,18 @@ _close_on_convergence() {
 }
 
 cmd_step() {
-  local sid="" auto_relay="false" auto_decision="false" dry="false"
+  # XAR-1Bb.6 (DEC-054): auto-relay is the DEFAULT — a bare `step` collects and
+  # relays the next turn automatically. `--manual` (alias `--no-auto-relay`)
+  # opts back out to the original pause-on-every-turn behavior. `--auto-relay`
+  # is still accepted (now a no-op) for backward compatibility. `--auto-decision`
+  # stays opt-in (adversarial decision authoring).
+  local sid="" auto_relay="true" auto_decision="false" dry="false"
   local instr_file="" intervene="" control_file="" read_stdin="false"
   STEP_JSON="false"
   while (($#)); do case "$1" in
     --session) sid="$2"; shift 2 ;;
-    --auto-relay) auto_relay="true"; shift ;;
+    --auto-relay) shift ;;  # no-op: auto-relay is the default (DEC-054); kept for backward compat
+    --manual|--no-auto-relay) auto_relay="false"; shift ;;  # explicit opt-out always wins, order-independent
     --auto-decision) auto_decision="true"; shift ;;
     --instructions-file) instr_file="$2"; shift 2 ;;
     --intervene) intervene="$2"; shift 2 ;;
@@ -1203,7 +1221,7 @@ cmd_step() {
 
   case "$next_kind" in
     response)
-      [ "$auto_relay" = "true" ] || { _emit_step "paused" "response turn but --auto-relay not set"; exit 0; }
+      [ "$auto_relay" = "true" ] || { _emit_step "paused" "manual mode: response turn paused (--manual set; omit it to auto-relay)"; exit 0; }
       ;;
     decision)
       if [ "$dmode" = "parallel_review" ]; then
@@ -1213,7 +1231,7 @@ cmd_step() {
         # orchestrator never writes it and --auto-decision is NOT honored.
         # Gate on --auto-relay (PR #95 codex P3): a plain `step` probe must pause,
         # not produce a draft.
-        [ "$auto_relay" = "true" ] || { _emit_step "paused" "parallel decision turn — pass --auto-relay to emit synthesis + decision draft"; exit 0; }
+        [ "$auto_relay" = "true" ] || { _emit_step "paused" "manual mode: parallel decision turn paused (--manual set; omit it to emit synthesis + decision draft)"; exit 0; }
         # DEC-029 convergence (정밀화 PR): if BOTH reviewers came back clean
         # (_effective_responses_all_zero), there is nothing to disposition — surface
         # an explicit `converged` close-draft (next_action close, empty decisions)
@@ -1241,7 +1259,7 @@ cmd_step() {
           # as provenance (not forged — it's the existing user instruction) so
           # --auto-relay can run a multi-round cycle without input after every
           # continue decision (the documented 0-input adversarial path).
-          [ "$auto_relay" = "true" ] || { _emit_step "paused" "continue request but --auto-relay not set"; exit 0; }
+          [ "$auto_relay" = "true" ] || { _emit_step "paused" "manual mode: continue request paused (--manual set; omit it to auto-relay)"; exit 0; }
           [ -n "$instructions" ] || instructions="$(_latest_request_oui "$sid")"
           [ -n "$instructions" ] || { _emit_step "paused" "continue request but no prior instructions to carry"; exit 0; }
           ;;

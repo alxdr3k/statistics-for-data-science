@@ -68,6 +68,17 @@ Subcommands:
   whose-turn  --session <id> [--json]
   watch       --session <id> --agent codex|claude [--interval <sec>]
               [--timeout <sec>] [--notify desktop] [--json]
+  resolve     [--agent codex|claude] [--json]
+              calling conversation's active session set after reconcile/prune
+              (XAR-1Bc.1; best-effort — resolvable:false with no env conv id)
+  snapshot    [--agent codex|claude] [--json]
+              persist an ephemeral numbered selector (snapshot_id -> index->sid)
+              for the calling conversation's active set, then echo the numbered
+              list (XAR-1Bc.2; supersedes any prior snapshot for the conversation)
+  select      <snapshot_id> <index> [--agent codex|claude] [--json]
+              resolve <index> against a snapshot (consume-once, expiring,
+              still-active re-validated; conversation-local). resolved:false on
+              superseded/expired/out-of-range/inactive (XAR-1Bc.2)
 
 Note kinds:
   request     initiator's request body
@@ -92,6 +103,245 @@ gen_session_id() {
 
 now_utc() {
   date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+now_epoch() {
+  # Seconds since the Unix epoch. Used for snapshot expiry math (XAR-1Bc.2):
+  # `created_epoch` is stored at snapshot creation and compared directly to
+  # avoid the non-portable ISO-string→epoch parse (`date -d` vs `date -j`).
+  date +%s
+}
+
+# --- Conversation-scoped sticky pointer state (XAR-1Bc.1; ADR-0005/DEC-053) --
+#
+# The runtime injects a stable per-conversation id into the shell env (Claude
+# `CLAUDE_CODE_SESSION_ID`, Codex `CODEX_THREAD_ID`; both stable within a
+# conversation, unique across, and surviving `codex resume`). That lets the
+# helper hold a per-conversation pointer (active session set + last_touched)
+# keyed by conversation id, so `/pingpong continue|stop` can omit <session_id>
+# deterministically (INV-0005-1). It is durability + tier-1 recovery, NOT
+# ambiguity elimination (INV-0005-5): every read reconciles the set against
+# canonical session.json status and prunes closed/abandoned.
+#
+# Best-effort: with no conversation id in the env (e.g. the relay subprocess
+# runs under `env -i`, or a non-agent shell) every pointer op is a silent
+# no-op and callers fall back to conversation memory (DEC-025). A pointer
+# failure MUST NEVER fail the underlying init/write — call sites wrap `|| true`.
+
+POINTERS_DIR="$AGENT_DIALOG_HOME/pointers"
+# --- Ephemeral snapshot selector store (XAR-1Bc.2; ADR-0005 INV-0005-4/6) -----
+# When a conversation has 2+ active sessions, a mutating op cannot resolve a
+# bare number against the LIVE active-set (the set can change between the
+# numbered list and the user's pick → silent index TOCTOU). Instead `snapshot`
+# persists a `snapshot_id -> {index -> sid}` binding for the calling
+# conversation and `select` resolves the number against THAT snapshot:
+# consume-once, expiring, and re-validated against canonical session status.
+# Snapshots are keyed by conversation id (agent-prefixed) so a selector is
+# local + non-portable — a select from another conversation/agent cannot see
+# the snapshot_id and is rejected (INV-0005-6). One file per conversation; a
+# new snapshot supersedes the prior one.
+SNAPSHOTS_DIR="$AGENT_DIALOG_HOME/snapshots"
+# Snapshot lifetime; override for tests. A user picking a number from a chat
+# prompt resolves within seconds-to-minutes, so a few minutes is ample.
+AGENT_DIALOG_SNAPSHOT_TTL_SECONDS="${AGENT_DIALOG_SNAPSHOT_TTL_SECONDS:-900}"
+
+_conversation_id() {
+  # Resolve the calling conversation's stable id from the runtime env.
+  # Optional $1 = agent hint (codex|claude): when given, resolve STRICTLY to
+  # that runtime's env var or empty — an explicit agent-scoped op MUST NOT read
+  # the other agent's namespace (INV-0005-6 locality).
+  # With NO usable agent hint (e.g. sender=user note/relay/decision writes):
+  #   - exactly one runtime id present → use it;
+  #   - BOTH present (companion shell) → AMBIGUOUS → return empty (no-op /
+  #     resolvable:false). Guessing a namespace here would let a user-sender
+  #     write refresh the wrong agent's pointer (P5-F1, INV-0005-6). The caller
+  #     must pass an explicit --agent to disambiguate.
+  # Output: "<source>:<id>" or empty. Always returns 0.
+  local hint="${1:-}"
+  case "$hint" in
+    claude) if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; fi; return 0 ;;
+    codex)  if [[ -n "${CODEX_THREAD_ID:-}"        ]]; then printf 'codex:%s'  "$CODEX_THREAD_ID";        fi; return 0 ;;
+  esac
+  if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && -n "${CODEX_THREAD_ID:-}" ]]; then
+    return 0   # both present, no hint → ambiguous, do not guess
+  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"
+  elif [[ -n "${CODEX_THREAD_ID:-}" ]];        then printf 'codex:%s'  "$CODEX_THREAD_ID"
+  fi
+  return 0
+}
+
+_pointer_lock() {
+  # Best-effort per-pointer-file lock via atomic mkdir (closes the same-file
+  # read/modify/write race — INV-0005-2/3 keystone: a lost update could drop a
+  # session and make a genuinely-ambiguous conversation resolve as single).
+  # 0=acquired, 1=not. A few quick retries absorb a transient holder finishing
+  # its ~ms critical section; on failure callers MUST no-op (upsert) or
+  # skip-rewrite (reconcile) — never block the underlying init/write.
+  #
+  # Stale-lock stealing is deliberately NOT done (P3-F3): an unlocked
+  # age-check-then-remove cannot be made race-free without a heavier
+  # recovery-lock, and stealing risks deleting a peer's FRESH lock and
+  # readmitting the lost-update race it was meant to prevent. A lock is only
+  # ever orphaned by a hard crash inside the millisecond critical section
+  # (every normal path unlocks); that conversation then degrades to
+  # conversation-memory until the stray `<pf>.lock` dir is removed.
+  local lock="$1.lock" i
+  for i in 1 2 3; do
+    if mkdir "$lock" 2>/dev/null; then return 0; fi
+    sleep 0.05 2>/dev/null || true
+  done
+  return 1
+}
+
+_pointer_unlock() { rmdir "$1.lock" 2>/dev/null || rm -rf "$1.lock" 2>/dev/null || true; }
+
+_session_is_active() {
+  # Single source of truth for "is <sid> a still-active session" — shared by the
+  # active-set prune (INV-0005-5) and the snapshot selector's still-active
+  # re-validation (INV-0005-4). Returns 0 (active) / 1 (not).
+  #
+  # Active = sid matches the canonical gen_session_id shape (rejecting a crafted
+  # path-component like `../evil` before it is used as a path — P3-F1) AND
+  # status is `open` AND the latest protocol decision is not an interrupted
+  # terminal close (session_close=true left status="open" by a crash → still
+  # effectively closed, P6-F1).
+  local sid="$1" status
+  [[ "$sid" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{16}$ ]] || return 1
+  status="$(jq -r '.status // "missing"' "$SESSIONS_DIR/$sid/session.json" 2>/dev/null || printf 'missing')"
+  [[ "$status" == "open" ]] && ! _session_latest_terminal_close "$SESSIONS_DIR/$sid"
+}
+
+_pointer_prune_active() {
+  # Given an `active` JSON array, echo the subset whose session is still `open`.
+  # Skips malformed entries (non-object / missing-or-non-string session_id) and
+  # sessions whose dir is gone — so a wrong-shaped entry can never wedge prune.
+  local arr="$1" keep="[]" n i entry sid
+  n="$(jq 'length' <<<"$arr" 2>/dev/null || printf 0)"
+  for (( i=0; i<n; i++ )); do
+    entry="$(jq -c ".[$i]" <<<"$arr" 2>/dev/null)" || continue
+    sid="$(jq -r 'if type=="object" and (.session_id|type)=="string" then .session_id else "" end' <<<"$entry" 2>/dev/null || printf '')"
+    [[ -n "$sid" ]] || continue
+    if _session_is_active "$sid"; then
+      keep="$(jq -c --argjson e "$entry" '. + [$e]' <<<"$keep")"
+    fi
+  done
+  # De-duplicate by session_id, keeping the last occurrence (= most-recent per
+  # upsert's append convention). A corrupt pointer with repeated entries for one
+  # open sid must NOT inflate the count into false ambiguity (R4-F1; INV-0005-3/5).
+  keep="$(jq -c 'reduce .[] as $e ([]; map(select(.session_id != $e.session_id)) + [$e])' <<<"$keep" 2>/dev/null || printf '%s' "$keep")"
+  printf '%s' "$keep"
+}
+
+_cid_path() {
+  # Map a conversation id to a COLLISION-FREE per-conversation file path under
+  # $1 (dir). A readable sanitized prefix (odd bytes → '_') keeps files
+  # debuggable, and a full hex encoding of the raw cid (`od`, already a helper
+  # dependency) guarantees the mapping is one-to-one — two distinct conversation
+  # ids can never share a file even if their sanitized forms coincide (F4'). Hex
+  # contains no path separator so traversal is impossible. Distinct source
+  # prefixes (claude:/codex:) keep the two runtimes' namespaces apart
+  # (INV-0005-6 locality — applies to both pointer and snapshot stores).
+  local dir="$1" cid="$2" safe enc
+  safe="$(printf '%s' "$cid" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
+  enc="$(printf '%s' "$cid" | od -An -v -tx1 | LC_ALL=C tr -d ' \n')"
+  printf '%s/%s.%s.json' "$dir" "$safe" "$enc"
+}
+
+_pointer_file()  { _cid_path "$POINTERS_DIR"  "$1"; }
+_snapshot_file() { _cid_path "$SNAPSHOTS_DIR" "$1"; }
+
+_pointer_upsert() {
+  # Best-effort: record that the CALLING conversation touched <sid>, refreshing
+  # last_touched and moving the entry to most-recent (last array element).
+  # No-op when no env conversation id. Never fails the caller.
+  #
+  # PR3-F2: the calling conversation is whichever runtime is executing the helper
+  # — derived from the env (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID), NOT from
+  # the message `--sender`. `--sender` is message authorship: in an auto-relay
+  # step a Claude conversation persists a `sender=codex` response, and that touch
+  # must land on Claude's pointer (the conversation that ran the command), not
+  # Codex's. So `_conversation_id` is called with NO hint (env-derived; both
+  # present → ambiguous no-op per P5-F1). $2 is accepted but ignored for
+  # call-site compatibility.
+  local sid="$1" _ignored_hint="${2:-}" cid pf tmp topic now
+  cid="$(_conversation_id)"
+  [[ -n "$cid" ]] || return 0
+  [[ -f "$SESSIONS_DIR/$sid/session.json" ]] || return 0
+  topic="$(jq -r '.topic // ""' "$SESSIONS_DIR/$sid/session.json" 2>/dev/null || printf '')"
+  now="$(now_utc)"
+  mkdir -p "$POINTERS_DIR" 2>/dev/null || return 0
+  pf="$(_pointer_file "$cid")"
+  # P7-F1: a silently-skipped upsert (lock contention / write failure) would
+  # leave the pointer stale-but-authoritative — a later resolve could report a
+  # genuinely multi-active conversation as a single active session, violating
+  # the keystone (INV-0005-2). On any skip/failure, drop a lock-free `.dirty`
+  # marker; resolve then reports resolvable:false (caller falls back to explicit
+  # sid / conversation memory) until a successful upsert clears it. This also
+  # lets a crash-orphaned lock degrade safely without racy stale-stealing.
+  if ! _pointer_lock "$pf"; then
+    touch "$pf.dirty" 2>/dev/null || true   # contention → mark unreliable, never block write
+    return 0
+  fi
+  tmp="$pf.tmp.$$"
+  local wrote="false"
+  if [[ -f "$pf" ]] && jq -e '(.active? // []) | type == "array"' "$pf" >/dev/null 2>&1; then
+    # Valid existing pointer (parses AND .active is an array): drop any prior
+    # entry for sid, append fresh (last = most-recently-touched). A
+    # syntactically-valid but wrong-shaped file (e.g. .active is a string)
+    # falls to the recreate branch below (F3').
+    jq --arg sid "$sid" --arg cid "$cid" --arg topic "$topic" --arg now "$now" \
+      '{schema_version: 1, conversation_id: $cid,
+        active: (((.active // [])
+                  | map(select(type == "object" and (.session_id | type) == "string"))
+                  | map(select(.session_id != $sid)))
+                 + [{session_id: $sid, topic: $topic, last_touched: $now}])}' \
+      "$pf" > "$tmp" 2>/dev/null && mv "$tmp" "$pf" && wrote="true" || { rm -f "$tmp" 2>/dev/null || true; }
+  else
+    # Missing OR malformed existing file → (re)create fresh. Self-heal (F3):
+    # a corrupt pointer artifact must not permanently disable future upserts.
+    jq -n --arg sid "$sid" --arg cid "$cid" --arg topic "$topic" --arg now "$now" \
+      '{schema_version: 1, conversation_id: $cid,
+        active: [{session_id: $sid, topic: $topic, last_touched: $now}]}' \
+      > "$tmp" 2>/dev/null && mv "$tmp" "$pf" && wrote="true" || { rm -f "$tmp" 2>/dev/null || true; }
+  fi
+  if [[ "$wrote" != "true" ]]; then
+    touch "$pf.dirty" 2>/dev/null || true   # write failed under lock → unreliable
+  fi
+  # PR-F2: a successful SINGLE-session upsert does NOT clear `.dirty`. `.dirty`
+  # means "a prior upsert was skipped, so the active set may be missing a
+  # session"; touching one session later does not rebuild the missing one, so
+  # clearing here would wrongly mark a still-incomplete pointer reliable and
+  # re-open the false single-active hole (INV-0005-2). Once set, `.dirty` is
+  # sticky — resolve stays resolvable:false until the artifact is repaired/removed.
+  _pointer_unlock "$pf"
+  return 0
+}
+
+_pointer_reconcile_locked() {
+  # INV-0005-5: drop entries whose session is gone or no longer `open`,
+  # rewriting the pruned pointer file in place. Echo the pruned active array
+  # (JSON) to stdout.
+  #
+  # CALLER MUST HOLD the pointer lock (`_pointer_lock "$pf"`). Doing the read +
+  # prune + rewrite under the caller's single lock makes resolve atomic w.r.t.
+  # upserts — there is no unlocked read window for a concurrent upsert to slip a
+  # second active session past (PR2-F1 read-vs-upsert TOCTOU). No internal lock.
+  local pf="$1" tmp arr keep
+  [[ -f "$pf" ]] || { printf '[]'; return 0; }
+  # Malformed artifact (F3'): bad JSON syntax OR wrong shape (.active not an
+  # array). Heal to an empty valid doc and report []. Next upsert recreates.
+  if ! jq -e '(.active? // []) | type == "array"' "$pf" >/dev/null 2>&1; then
+    tmp="$pf.tmp.$$"
+    jq -n '{schema_version: 1, active: []}' > "$tmp" 2>/dev/null && mv "$tmp" "$pf" || { rm -f "$tmp" 2>/dev/null || true; }
+    printf '[]'; return 0
+  fi
+  arr="$(jq -c '.active // []' "$pf" 2>/dev/null || printf '[]')"
+  keep="$(_pointer_prune_active "$arr")"
+  if [[ "$(jq 'length' <<<"$keep")" != "$(jq 'length' <<<"$arr")" ]]; then
+    tmp="$pf.tmp.$$"
+    jq --argjson keep "$keep" '.active = $keep' "$pf" > "$tmp" 2>/dev/null && mv "$tmp" "$pf" || { rm -f "$tmp" 2>/dev/null || true; }
+  fi
+  printf '%s' "$keep"
 }
 
 # --- Lock handling ----------------------------------------------------------
@@ -830,6 +1080,24 @@ _heal_interrupted_terminal_close() {
      "$sj" > "$sj.tmp"
   mv "$sj.tmp" "$sj"
   return 0
+}
+
+_session_latest_terminal_close() {
+  # Read-only projection (no mutation, no lock): returns 0 when the session's
+  # latest protocol message is a session_close=true decision — i.e. the session
+  # is effectively terminal even if an interrupted close left
+  # session.json.status="open". Mirrors _heal_interrupted_terminal_close /
+  # _whose_turn_json so the pointer prune treats the same set as closed
+  # (P6-F1 / INV-0005-5).
+  local sdir="$1" latest_kind latest_decision_file close_flag
+  latest_kind="$(latest_message_kind "$sdir" 2>/dev/null || printf '')"
+  [[ "$latest_kind" == "decision" ]] || return 1
+  latest_decision_file="$(ls "$sdir/messages" 2>/dev/null \
+    | grep -E '^[0-9]{6}-decision\.json$' | sort -n | tail -1)"
+  [[ -n "$latest_decision_file" ]] || return 1
+  close_flag="$(jq -r '.body.session_close // false' \
+    "$sdir/messages/$latest_decision_file" 2>/dev/null || printf 'false')"
+  [[ "$close_flag" == "true" ]]
 }
 
 response_findings_all_deferred_in_decision() {
@@ -1670,6 +1938,10 @@ cmd_init() {
     > "$sdir/session.json.tmp"
   mv "$sdir/session.json.tmp" "$sdir/session.json"
 
+  # XAR-1Bc.1 (ADR-0005): record this session under the initiator's
+  # conversation pointer (best-effort; never fails init).
+  _pointer_upsert "$sid" "$initiator" || true
+
   if [[ "$emit_json" == "true" ]]; then
     jq -n --arg sid "$sid" --arg sdir "$sdir" --arg dmode "$dialogue_mode" \
       '{schema_version: 1, kind: "agent_dialog_init", session_id: $sid, session_dir: $sdir, dialogue_mode: $dmode}'
@@ -1890,6 +2162,11 @@ cmd_write() {
       mv "$sj.tmp" "$sj"
     fi
   fi
+
+  # XAR-1Bc.1 (ADR-0005): record this conversation's touch of the session
+  # (best-effort; never fails the write). A close just written is pruned on
+  # the next resolve via _pointer_reconcile (INV-0005-5).
+  _pointer_upsert "$session" "$sender" || true
 
   emit_warnings_stderr
 
@@ -2861,6 +3138,424 @@ cmd_watch() {
   done
 }
 
+gen_snapshot_id() {
+  # Opaque, unguessable per-snapshot id. Non-portability (INV-0005-6) comes from
+  # keying the snapshot file by conversation id; an unguessable id additionally
+  # prevents a bare cross-conversation number from ever colliding with a live
+  # snapshot_id.
+  local rand
+  rand="$(LC_ALL=C head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 18)"
+  printf 'snap-%s' "$rand"
+}
+
+_snapshot_unresolvable() {
+  # Emit the snapshot resolvable:false shape (same reasons family as resolve).
+  local emit_json="$1" cid="$2" reason="$3"
+  if [[ "$emit_json" == "true" ]]; then
+    jq -n --arg cid "$cid" --arg r "$reason" \
+      '{schema_version:1, kind:"agent_dialog_snapshot", resolvable:false,
+        conversation_id:(if $cid=="" then null else $cid end),
+        snapshot_id:null, count:0, ambiguous:false, entries:[], reason:$r}'
+  else
+    echo "resolvable: false ($reason)"
+  fi
+}
+
+_select_reject() {
+  # Emit the select resolved:false shape. <index> has already been validated as
+  # a positive integer by the time any reject path runs.
+  local emit_json="$1" cid="$2" snap="$3" index="$4" reason="$5"
+  if [[ "$emit_json" == "true" ]]; then
+    jq -n --arg cid "$cid" --arg snap "$snap" --argjson idx "$index" --arg r "$reason" \
+      '{schema_version:1, kind:"agent_dialog_select", resolved:false,
+        conversation_id:(if $cid=="" then null else $cid end),
+        snapshot_id:$snap, index:$idx, reason:$r}'
+  else
+    echo "resolved: false ($reason)"
+  fi
+}
+
+# Self-releasing wrapper around the generic mkdir lock for the ephemeral
+# snapshot file (XAR-1Bc.2; codex pass-2 medium). The mkdir lock deliberately
+# does not stale-steal (same rationale as _pointer_lock), so without this an
+# interrupted select/snapshot holding `$sf.lock` would wedge the conversation's
+# numbered selector until the stray dir is removed. Mirror acquire_lock's
+# pattern: a trap keyed on a global path releases ONLY the lock this process
+# holds (never a stale-steal of a peer's lock) on every non-SIGKILL
+# exit/interruption; the explicit unlock disarms it. SIGKILL is unavoidable,
+# exactly as for acquire_lock's symlink lock. Only the snapshot lock is guarded
+# — the pointer lock keeps its PHASE-1 behaviour (degrade to conversation
+# memory on orphan) and is always released before the snapshot lock is taken.
+_SNAPSHOT_TRAP_LOCKDIR=""
+_snapshot_lock() {
+  # $1 = snapshot file path. 0 = acquired (+ cleanup trap armed), 1 = not.
+  #
+  # The mkdir lock carries NO owner marker (unlike acquire_lock's symlink, which
+  # records `$$` and is removed only after an ownership re-check). So the cleanup
+  # must remove the lock EXACTLY ONCE, while this process still holds it — a
+  # second removal could delete a peer's freshly-acquired lock and re-open the
+  # consume-once race (codex pass-3 P2). The INT/TERM handlers therefore disarm
+  # the EXIT trap (and each other) BEFORE re-raising, so the lock is never
+  # removed twice. The handler runs while we still hold the lock, so it only ever
+  # frees our own.
+  _pointer_lock "$1" || return 1
+  _SNAPSHOT_TRAP_LOCKDIR="$1.lock"
+  trap 'rm -rf "$_SNAPSHOT_TRAP_LOCKDIR" 2>/dev/null || true' EXIT
+  trap 'rm -rf "$_SNAPSHOT_TRAP_LOCKDIR" 2>/dev/null || true; trap - EXIT INT TERM; kill -INT $$' INT
+  trap 'rm -rf "$_SNAPSHOT_TRAP_LOCKDIR" 2>/dev/null || true; trap - EXIT INT TERM; kill -TERM $$' TERM
+  return 0
+}
+_snapshot_unlock() {
+  # $1 = snapshot file path. DISARM the cleanup trap BEFORE releasing the lock
+  # (codex pass-4 P2). Invariant: the trap is armed only WITHIN the lock-hold
+  # window (armed after acquire, disarmed before release), so whenever it fires
+  # we still hold the lock and it can only free our own. Releasing first would
+  # leave a window where a signal fires the still-armed trap after the lock was
+  # released and a peer re-acquired it — deleting the peer's fresh lock. A signal
+  # in the (now sub-statement) gap between disarm and release merely orphans our
+  # own lock (graceful degrade to "busy" / explicit <session_id>), never steals a
+  # peer's.
+  trap - EXIT INT TERM
+  _SNAPSHOT_TRAP_LOCKDIR=""
+  _pointer_unlock "$1"
+}
+
+cmd_snapshot() {
+  # XAR-1Bc.2 (ADR-0005 INV-0005-4): build + persist an ephemeral numbered
+  # selector for the calling conversation's active set. Reconciles/prunes first
+  # under the pointer lock (INV-0005-5; atomic w.r.t. upserts — same locked read
+  # as resolve), then writes `snapshot_id -> [{index, session_id, ...}]` to a
+  # per-conversation file (overwriting/superseding any prior snapshot) and
+  # echoes the numbered list. `select` later resolves a number against THIS
+  # snapshot, not the live set, closing the index TOCTOU. No conversation id /
+  # unreliable pointer → resolvable:false (caller falls back to explicit
+  # <session_id> / conversation memory, DEC-025).
+  local agent="" emit_json="false"
+  while (( $# )); do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --json)  emit_json="true"; shift ;;
+      *) die 3 "snapshot: unknown argument: $1" ;;
+    esac
+  done
+  case "$agent" in ""|codex|claude) ;; *) die 3 "snapshot: --agent must be codex|claude" ;; esac
+
+  local cid; cid="$(_conversation_id "$agent")"
+  if [[ -z "$cid" ]]; then
+    _snapshot_unresolvable "$emit_json" "" "no conversation id in env (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID); fall back to conversation memory"
+    return 0
+  fi
+
+  local pf bn
+  pf="$(_pointer_file "$cid")"
+  bn="${pf##*/}"
+  if (( ${#bn} > 240 )); then
+    _snapshot_unresolvable "$emit_json" "$cid" "conversation id too long to represent as a pointer filename; fall back to conversation memory"
+    return 0
+  fi
+  if [[ -f "$pf.dirty" ]]; then
+    _snapshot_unresolvable "$emit_json" "$cid" "pointer state unreliable — a prior update was skipped (.dirty); use explicit <session_id> until repaired"
+    return 0
+  fi
+  if ! _pointer_lock "$pf"; then
+    _snapshot_unresolvable "$emit_json" "$cid" "pointer busy or lock orphaned (write in progress / crash); use explicit <session_id> and retry"
+    return 0
+  fi
+  local active; active="$(_pointer_reconcile_locked "$pf")"
+  _pointer_unlock "$pf"
+  if [[ -f "$pf.dirty" ]]; then
+    _snapshot_unresolvable "$emit_json" "$cid" "pointer became unreliable during snapshot (a concurrent update was skipped); use explicit <session_id> until repaired"
+    return 0
+  fi
+
+  local count; count="$(jq 'length' <<<"$active")"
+  if [[ "$count" -lt 1 ]]; then
+    # Nothing to select — do NOT persist a snapshot.
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n --arg cid "$cid" '{schema_version:1, kind:"agent_dialog_snapshot", resolvable:true, conversation_id:$cid, snapshot_id:null, count:0, ambiguous:false, entries:[]}'
+    else
+      printf 'conversation: %s\nactive sessions: 0 (nothing to select)\n' "$cid"
+    fi
+    return 0
+  fi
+
+  # 1-based index per active entry (array order = last_touched ascending from
+  # upsert's append convention; most-recently-touched is last).
+  local entries
+  entries="$(jq -c 'to_entries | map({index:(.key + 1), session_id:.value.session_id, topic:(.value.topic // ""), last_touched:(.value.last_touched // "")})' <<<"$active")"
+
+  local sf sbn
+  sf="$(_snapshot_file "$cid")"
+  sbn="${sf##*/}"
+  if (( ${#sbn} > 240 )); then
+    _snapshot_unresolvable "$emit_json" "$cid" "conversation id too long to represent as a snapshot filename; fall back to conversation memory"
+    return 0
+  fi
+
+  local snapshot_id created_epoch created_at tmp
+  snapshot_id="$(gen_snapshot_id)"
+  created_epoch="$(now_epoch)"
+  created_at="$(now_utc)"
+  if ! mkdir -p "$SNAPSHOTS_DIR" 2>/dev/null; then
+    _snapshot_unresolvable "$emit_json" "$cid" "could not create snapshot store; use explicit <session_id>"
+    return 0
+  fi
+  tmp="$sf.tmp.$$"
+  # Serialize the snapshot write with select under the same per-snapshot-file
+  # lock (INV-0005-4 atomicity; codex high finding). select reads+validates+
+  # consumes the file under this lock, so superseding it here can never
+  # interleave with a select mid-read (which would let the index resolve against
+  # a different snapshot). The atomic `mv` keeps any unlocked reader from seeing
+  # a partial write; the lock additionally keeps a select's consume from
+  # deleting a snapshot this write just replaced. mkdir-lock contention is brief;
+  # if it cannot be acquired, report unresolvable rather than racing the write.
+  if ! _snapshot_lock "$sf"; then
+    _snapshot_unresolvable "$emit_json" "$cid" "snapshot store busy (a concurrent select/snapshot holds it); retry"
+    return 0
+  fi
+  if ! { jq -n --arg cid "$cid" --arg snap "$snapshot_id" --argjson ce "$created_epoch" \
+           --arg ca "$created_at" --argjson ttl "$AGENT_DIALOG_SNAPSHOT_TTL_SECONDS" \
+           --argjson entries "$entries" \
+           '{schema_version:1, kind:"agent_dialog_snapshot_store", conversation_id:$cid, snapshot_id:$snap, created_epoch:$ce, created_at:$ca, ttl_seconds:$ttl, entries:$entries}' \
+           > "$tmp" 2>/dev/null && mv "$tmp" "$sf" 2>/dev/null; }; then
+    rm -f "$tmp" 2>/dev/null || true
+    _snapshot_unlock "$sf"
+    _snapshot_unresolvable "$emit_json" "$cid" "could not persist snapshot; use explicit <session_id>"
+    return 0
+  fi
+  _snapshot_unlock "$sf"
+
+  if [[ "$emit_json" == "true" ]]; then
+    jq -n --arg cid "$cid" --arg snap "$snapshot_id" --argjson count "$count" \
+       --arg ca "$created_at" --argjson ttl "$AGENT_DIALOG_SNAPSHOT_TTL_SECONDS" --argjson entries "$entries" \
+      '{schema_version:1, kind:"agent_dialog_snapshot", resolvable:true, conversation_id:$cid, snapshot_id:$snap, count:$count, ambiguous:($count >= 2), created_at:$ca, ttl_seconds:$ttl, entries:$entries}'
+  else
+    printf 'conversation: %s\nsnapshot: %s (expires in %ss)\n' "$cid" "$snapshot_id" "$AGENT_DIALOG_SNAPSHOT_TTL_SECONDS"
+    jq -r '.[] | "  [\(.index)] \(.topic)  (\(.session_id))  last_touched \(.last_touched)"' <<<"$entries"
+    if [[ -n "$agent" ]]; then
+      printf 'select with: agent-dialog.sh select %s <number> --agent %s\n' "$snapshot_id" "$agent"
+    else
+      printf 'select with: agent-dialog.sh select %s <number>\n' "$snapshot_id"
+    fi
+  fi
+}
+
+cmd_select() {
+  # XAR-1Bc.2 (ADR-0005 INV-0005-4/6): resolve a numbered selection against the
+  # calling conversation's CURRENT ephemeral snapshot.
+  #
+  # ATOMICITY (codex high finding): the snapshot file is read EXACTLY ONCE into
+  # an immutable capture under a per-file lock, every field is validated against
+  # THAT capture (never by reopening the file), and the file is consumed
+  # (deleted) while the lock is still held. `cmd_snapshot` takes the same lock
+  # before superseding the file. This closes two races a multi-read/unlocked
+  # consume would open: (a) two concurrent selects both resolving one snapshot
+  # (consume-once violation), and (b) a select whose snapshot_id check passed
+  # against the old snapshot then reading entries from a newer superseding one
+  # and mis-routing the index to the wrong session (INV-0005-2 keystone /
+  # INV-0005-4 binding).
+  #
+  # Rejects (resolved:false) when: no conversation id; the snapshot is
+  # missing/superseded (a different or absent snapshot_id for this conversation
+  # — also the cross-conversation/agent locality guard, INV-0005-6); expired; the
+  # index is out of range; or the selected sid is no longer active (INV-0005-4
+  # still-active re-validation). A non-positive-integer index is a usage error.
+  local agent="" emit_json="false" snapshot_id="" index="" positional=()
+  while (( $# )); do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --json)  emit_json="true"; shift ;;
+      --) shift; while (( $# )); do positional+=("$1"); shift; done ;;
+      -*) die 3 "select: unknown argument: $1" ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  snapshot_id="${positional[0]:-}"
+  index="${positional[1]:-}"
+  [[ -n "$snapshot_id" ]] || die 3 "select: missing <snapshot_id>"
+  [[ -n "$index" ]] || die 3 "select: missing <index>"
+  case "$agent" in ""|codex|claude) ;; *) die 3 "select: --agent must be codex|claude" ;; esac
+  # A selector index is a bare positive integer (a number, never a sid).
+  [[ "$index" =~ ^[1-9][0-9]*$ ]] || die 3 "select: <index> must be a positive integer (got: $index)"
+
+  local cid; cid="$(_conversation_id "$agent")"
+  if [[ -z "$cid" ]]; then
+    _select_reject "$emit_json" "" "$snapshot_id" "$index" "no conversation id in env; a numbered selector is conversation-local (INV-0005-6) — use explicit <session_id>"
+    return 0
+  fi
+
+  local sf sbn
+  sf="$(_snapshot_file "$cid")"
+  sbn="${sf##*/}"
+  if (( ${#sbn} > 240 )); then
+    _select_reject "$emit_json" "$cid" "$snapshot_id" "$index" "conversation id too long to represent as a snapshot filename; use explicit <session_id>"
+    return 0
+  fi
+  # Fast path for the common "never created" case (gives the right reason and
+  # avoids locking a path whose parent dir may not exist). The authoritative
+  # check is the post-lock capture below — a concurrent consume between here and
+  # the lock surfaces the same "no snapshot" reject.
+  if [[ ! -f "$sf" ]]; then
+    _select_reject "$emit_json" "$cid" "$snapshot_id" "$index" "no snapshot for this conversation (never created, already consumed, or superseded); run snapshot again"
+    return 0
+  fi
+  # Whole read+validate+consume is atomic w.r.t. a superseding snapshot or a
+  # racing select. An orphaned lock (crash mid-critical-section) → reject +
+  # retry, never block.
+  if ! _snapshot_lock "$sf"; then
+    _select_reject "$emit_json" "$cid" "$snapshot_id" "$index" "snapshot busy (a concurrent select/snapshot holds it); retry"
+    return 0
+  fi
+  # Read the snapshot EXACTLY ONCE into an immutable capture; validate every
+  # field against THIS capture, never by reopening the file.
+  local snap_json=""
+  [[ -f "$sf" ]] && snap_json="$(cat "$sf" 2>/dev/null || true)"
+  if [[ -z "$snap_json" ]] || ! jq -e . <<<"$snap_json" >/dev/null 2>&1; then
+    _snapshot_unlock "$sf"
+    _select_reject "$emit_json" "$cid" "$snapshot_id" "$index" "no snapshot for this conversation (never created, already consumed, or superseded); run snapshot again"
+    return 0
+  fi
+
+  local stored_id created_epoch ttl now sid topic reject_reason="" consume="no"
+  stored_id="$(jq -r 'if (.snapshot_id|type)=="string" then .snapshot_id else "" end' <<<"$snap_json" 2>/dev/null || printf '')"
+  created_epoch="$(jq -r '.created_epoch // 0' <<<"$snap_json" 2>/dev/null || printf 0)"
+  ttl="$(jq -r '.ttl_seconds // 0' <<<"$snap_json" 2>/dev/null || printf 0)"
+  [[ "$created_epoch" =~ ^[0-9]+$ ]] || created_epoch=0
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=0
+  now="$(now_epoch)"
+  # Index → sid within the SNAPSHOT capture (not the live set — that is the whole
+  # point). Bracket-collect + `.[0]` so a (tampered) snapshot with duplicate
+  # indices yields one value without a `head` pipe (which under `set -o
+  # pipefail` could SIGPIPE jq).
+  sid="$(jq -r --argjson i "$index" '[(.entries // [])[]? | select(.index == $i) | .session_id] | .[0] // empty' <<<"$snap_json" 2>/dev/null || printf '')"
+  topic="$(jq -r --argjson i "$index" '[(.entries // [])[]? | select(.index == $i) | .topic] | .[0] // ""' <<<"$snap_json" 2>/dev/null || printf '')"
+
+  # Validate in order. A mismatch on snapshot_id = superseded by a newer snapshot
+  # OR a foreign (other-conversation/agent) selector — both reject (INV-0005-4
+  # superseded; INV-0005-6 locality).
+  if [[ -z "$stored_id" || "$stored_id" != "$snapshot_id" ]]; then
+    reject_reason="snapshot superseded or not found for this conversation; run snapshot again"
+  elif (( now - created_epoch > ttl )); then
+    reject_reason="snapshot expired (older than ${ttl}s); run snapshot again"
+    consume="yes"   # an expired snapshot is dead — clean it up
+  elif [[ -z "$sid" ]]; then
+    reject_reason="index $index out of range for this snapshot; run snapshot again to see current numbers"
+  elif ! _session_is_active "$sid"; then
+    # Do NOT consume — after a fresh snapshot the user can pick a still-valid number.
+    reject_reason="selected session ($sid) is no longer active; run snapshot again"
+  else
+    consume="yes"   # success → consume-once
+  fi
+
+  # Consume (delete) ONLY while still holding the lock, so no concurrent snapshot
+  # can have superseded the exact file we validated.
+  [[ "$consume" == "yes" ]] && { rm -f "$sf" 2>/dev/null || true; }
+  _snapshot_unlock "$sf"
+
+  if [[ -n "$reject_reason" ]]; then
+    _select_reject "$emit_json" "$cid" "$snapshot_id" "$index" "$reject_reason"
+    return 0
+  fi
+  if [[ "$emit_json" == "true" ]]; then
+    jq -n --arg cid "$cid" --arg snap "$snapshot_id" --argjson idx "$index" --arg sid "$sid" --arg topic "$topic" \
+      '{schema_version:1, kind:"agent_dialog_select", resolved:true, conversation_id:$cid, snapshot_id:$snap, index:$idx, session_id:$sid, topic:$topic}'
+  else
+    printf 'resolved: %s  (%s)\n' "$sid" "$topic"
+  fi
+}
+
+cmd_resolve() {
+  # XAR-1Bc.1 (ADR-0005): report the calling conversation's active session set
+  # after reconcile/prune (INV-0005-5). Surfaces active-set + last_touched +
+  # an `ambiguous` signal (count >= 2). This is NOT an authority for mutating
+  # ops (INV-0005-2/3) — the skill (PHASE-3) owns tier-1/tier-2 and the
+  # snapshot selector (PHASE-2). With no conversation id in env, returns
+  # resolvable:false so the caller falls back to conversation memory (DEC-025).
+  local agent="" emit_json="false"
+  while (( $# )); do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --json)  emit_json="true"; shift ;;
+      *) die 3 "resolve: unknown argument: $1" ;;
+    esac
+  done
+  case "$agent" in ""|codex|claude) ;; *) die 3 "resolve: --agent must be codex|claude" ;; esac
+
+  local cid; cid="$(_conversation_id "$agent")"
+  if [[ -z "$cid" ]]; then
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n '{schema_version:1, kind:"agent_dialog_resolve", resolvable:false, reason:"no conversation id in env (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID); fall back to conversation memory", count:0, ambiguous:false, active:[]}'
+    else
+      echo "resolvable: false (no conversation id in env; use explicit <session_id>)"
+    fi
+    return 0
+  fi
+
+  local pf active count bn
+  pf="$(_pointer_file "$cid")"
+  # If the cid maps to a filename longer than the filesystem allows (a crafted
+  # overlong conversation id), no pointer file can ever exist — report
+  # resolvable:false so the caller falls back to conversation memory instead of
+  # a misleading count:0/resolvable:true (P5-F2). Real runtime ids are bounded
+  # UUIDs; this only guards adversarial/crafted env values.
+  bn="${pf##*/}"
+  if (( ${#bn} > 240 )); then
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n '{schema_version:1, kind:"agent_dialog_resolve", resolvable:false, reason:"conversation id too long to represent as a pointer filename; fall back to conversation memory", count:0, ambiguous:false, active:[]}'
+    else
+      echo "resolvable: false (conversation id too long to represent; use explicit <session_id>)"
+    fi
+    return 0
+  fi
+  # P7-F1: a sticky `.dirty` marker means a prior upsert was skipped, so the
+  # active set may be incomplete → resolvable:false regardless of current lock
+  # state.
+  if [[ -f "$pf.dirty" ]]; then
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n --arg cid "$cid" '{schema_version:1, kind:"agent_dialog_resolve", resolvable:false, conversation_id:$cid, reason:"pointer state unreliable — a prior update was skipped (.dirty); use explicit <session_id> until repaired", count:0, ambiguous:false, active:[]}'
+    else
+      echo "resolvable: false (pointer state unreliable; use explicit <session_id>)"
+    fi
+    return 0
+  fi
+  # PR-F1/PR2-F1: acquire the pointer lock for the ENTIRE read so reconcile is
+  # atomic w.r.t. upserts — no unlocked window for a concurrent upsert to slip a
+  # second active session past, and a held/orphaned lock (write in progress or
+  # crash) means we cannot acquire → resolvable:false (never trust a possibly
+  # mid-write single-active count; INV-0005-2).
+  if ! _pointer_lock "$pf"; then
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n --arg cid "$cid" '{schema_version:1, kind:"agent_dialog_resolve", resolvable:false, conversation_id:$cid, reason:"pointer busy or lock orphaned (write in progress / crash); use explicit <session_id> and retry", count:0, ambiguous:false, active:[]}'
+    else
+      echo "resolvable: false (pointer busy/locked; use explicit <session_id>)"
+    fi
+    return 0
+  fi
+  active="$(_pointer_reconcile_locked "$pf")"
+  _pointer_unlock "$pf"
+  # PR3-F1: a concurrent upsert that could not acquire the lock while we held it
+  # marks `.dirty` lock-free. Recheck AFTER the locked read so a pointer that
+  # became unreliable during this resolve is not emitted as resolvable:true.
+  if [[ -f "$pf.dirty" ]]; then
+    if [[ "$emit_json" == "true" ]]; then
+      jq -n --arg cid "$cid" '{schema_version:1, kind:"agent_dialog_resolve", resolvable:false, conversation_id:$cid, reason:"pointer became unreliable during resolve (a concurrent update was skipped); use explicit <session_id> until repaired", count:0, ambiguous:false, active:[]}'
+    else
+      echo "resolvable: false (pointer became unreliable during resolve; use explicit <session_id>)"
+    fi
+    return 0
+  fi
+  count="$(jq 'length' <<<"$active")"
+  if [[ "$emit_json" == "true" ]]; then
+    jq -n --arg cid "$cid" --argjson active "$active" --argjson count "$count" \
+      '{schema_version:1, kind:"agent_dialog_resolve", resolvable:true, conversation_id:$cid, count:$count, ambiguous: ($count >= 2), active:$active}'
+  else
+    printf 'conversation: %s\n' "$cid"
+    printf 'active sessions: %s\n' "$count"
+    jq -r '.[] | "  - \(.session_id)  \(.topic)  (last_touched \(.last_touched))"' <<<"$active"
+    [[ "$count" -ge 2 ]] && echo "ambiguous: explicit <session_id> required for mutating ops" || true
+  fi
+}
+
 # --- Main -------------------------------------------------------------------
 
 main() {
@@ -2884,6 +3579,9 @@ main() {
     cleanup)    cmd_cleanup "$@" ;;
     whose-turn) cmd_whose_turn "$@" ;;
     watch)      cmd_watch "$@" ;;
+    resolve)    cmd_resolve "$@" ;;
+    snapshot)   cmd_snapshot "$@" ;;
+    select)     cmd_select "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 3 ;;
   esac

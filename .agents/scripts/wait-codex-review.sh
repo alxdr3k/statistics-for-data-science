@@ -34,6 +34,8 @@
 #                         one-time sleep when the first successful activity
 #                         poll has no comments/reviews/reactions (default 300)
 #   CODEX_BASELINE       ISO timestamp; activity at/before this is ignored.
+#                        A future-skewed value is clamped to "now" (a future
+#                        baseline would hide the helper's own review request).
 #   CODEX_REPO           owner/repo override (helpful in fork workflows).
 #   CODEX_PASS_ACTOR     exact GitHub login that signals pass via reaction
 #                        (default: chatgpt-codex-connector[bot])
@@ -414,6 +416,17 @@ review_request_posted=0
 review_request_acknowledged=0
 review_request_polls=0
 
+# When the operator pins the baseline via CODEX_BASELINE, clamp a future-skewed
+# value to "now" once — the same invariant the fetched-baseline path enforces.
+# A future baseline would otherwise hide the helper's own @codex review comment
+# and codex's eyes-ack (both posted before that future time) as "pre-baseline",
+# spuriously yielding exit 2 review_request_unacknowledged. Clamped once here so
+# the env baseline does not drift forward each poll.
+env_baseline=""
+if [ -n "${CODEX_BASELINE:-}" ]; then
+  env_baseline=$(clamp_to_now "$CODEX_BASELINE")
+fi
+
 started=$(date +%s)
 while :; do
   : > "$fetch_failures"
@@ -432,7 +445,7 @@ while :; do
   fi
 
   if [ -n "${CODEX_BASELINE:-}" ]; then
-    baseline="$CODEX_BASELINE"
+    baseline="$env_baseline"
     # When the caller fixes baseline via env, we still need a head SHA for
     # the observation. Fetch separately — drift is acceptable here because
     # the operator declared the baseline explicitly and is responsible for

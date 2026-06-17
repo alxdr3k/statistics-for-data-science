@@ -161,8 +161,8 @@ fi
 
 Claude Code에서 model-routed sub-agent를 사용할 수 있으면 비용/품질 균형을 위해 아래 원칙을 따른다. 사용할 수 없거나 handoff 비용이 더 크면 같은 세션에서 수행한다.
 
-- Review Pass의 기본 리뷰어는 Codex (`/codex:adversarial-review` 또는 `/codex:review`)다. `--opus-review` flag가 있을 때만 Opus sub-agent를 대신 사용한다. 입력은 full repo가 아니라 dossier review_inputs, risk triggers, 필요한 diff/call site/검증 출력으로 제한한다.
-- Design Risk Gate에서 high-risk로 분류된 작업은 구현 전에 read-only design reviewer를 사용할 수 있다. 기본 route는 `/codex:rescue`이고, `--opus-review`가 있거나 같은 파일군에서 design disagreement가 반복되면 Opus read-only reviewer를 쓸 수 있다. 어떤 reviewer를 쓰든 main session이 최종 design decision matrix로 다시 압축한 뒤 구현한다.
+- Review Pass round-1은 구현자의 반대편 reviewer를 쓴다. codex 구현이면 Opus, Claude 구현이면 Codex가 기본이다. `--opus-review`는 기존처럼 전 round Opus를 강제한다.
+- Design Risk Gate에서 high-risk이고 설계가 열려 있으면 pingpong-relay를 **per-turn driver loop**로 구동해 Codex<->Claude 적대 설계 리뷰를 실행한다 (단일 full-auto 명령이 아니다 — 경로 resolve·step loop·종료·fallback 규약은 Step 3.5 참조). locked design이면 검증만 한다.
 - 구현과 finding 수정은 Sonnet/main execution을 기본으로 한다. 단순 수정에 별도 Sonnet worker를 만들지 않는다.
 - PR polling, pass reaction 확인, comment fetch 같은 상태 확인은 `codex-loop`/helper script에 맡긴다. LLM이 필요한 요약/분류가 있을 때만 Haiku 또는 read-only Explore를 쓴다.
 - Opus reviewer resume은 기본값이 아니다. 같은 파일군에서 3회 이상 리뷰/반박/재검토가 이어지고 이전 판단 맥락이 중요할 때만 resume한다. 보통은 이전 finding 요약 + incremental diff로 새 리뷰를 요청한다.
@@ -192,6 +192,7 @@ Cycle 종료 시 JSON payload를 `finish-cycle-json` stdin으로 넘긴다. **AL
   "schema_version": 1,
   "cycle": 1,
   "result": "landed",
+  "implementer": "codex",
   "actions": [
     {"kind": "implement", "summary_ko": "이번 cycle에서 실제로 한 일"}
   ],
@@ -225,7 +226,19 @@ Cycle 종료 시 JSON payload를 `finish-cycle-json` stdin으로 넘긴다. **AL
 JSON
 ```
 
-필수 필드: `schema_version`, `cycle`, `result`, `actions`, `conclusion.summary_ko`, `verification`, `review_land`, `risks`. `review_ship`은 legacy alias로만 허용한다. `cycle`은 1부터 시작하는 정수이고, `actions`와 `verification`은 비어 있으면 안 되며 각 항목에 사용자-visible `summary_ko`를 쓴다. 권장 `result` 값은 `landed`, `blocked`, `all_clear`, `doc_fix_needed`다. 리스크가 없으면 `risks: []`를 쓴다. Ready slice가 없어 `ALL CLEAR`로 끝낼 때는 실제 수행한 탐색/판단을 `actions`와 `conclusion`에 쓰고, ready가 아닌 다음 검토 후보는 최대 3개까지 `next_candidates`에 둔다. 자동 승격을 검토했다면 `auto_promotion_candidates`에 검토한 후보와 가능/불가 이유를 쓰고, 실제 승격한 항목은 `auto_promotions`에 쓴다. `change_scope`, `verification_plan`, `design_risk`, `design_decisions`, 후보/승격 필드는 schema_version 1의 optional extension이다. 후보는 후속 안내이지 risk issue 대상이 아니므로 실제 리스크가 없으면 `risks: []`다.
+필수 필드: `schema_version`, `cycle`, `result`, `actions`, `conclusion.summary_ko`,
+`verification`, `review_land`, `risks`. 구현 또는 승격 cycle은 `implementer`도
+기록한다. 값은 `codex` 또는 `claude`다. `review_ship`은 legacy alias로만 허용한다.
+`cycle`은 1부터 시작하는 정수이고, `actions`와 `verification`은 비어 있으면 안 되며
+각 항목에 사용자-visible `summary_ko`를 쓴다. 권장 `result` 값은 `landed`,
+`blocked`, `all_clear`, `doc_fix_needed`다. 리스크가 없으면 `risks: []`를 쓴다.
+Ready slice가 없어 `ALL CLEAR`로 끝낼 때는 실제 수행한 탐색/판단을 `actions`와
+`conclusion`에 쓰고, ready가 아닌 다음 검토 후보는 최대 3개까지 `next_candidates`에
+둔다. 자동 승격을 검토했다면 `auto_promotion_candidates`에 검토한 후보와 가능/불가
+이유를 쓰고, 실제 승격한 항목은 `auto_promotions`에 쓴다. `change_scope`,
+`verification_plan`, `design_risk`, `design_decisions`, 후보/승격 필드는
+schema_version 1의 optional extension이다. 후보는 후속 안내이지 risk issue 대상이
+아니므로 실제 리스크가 없으면 `risks: []`다.
 
 `finish-cycle-json` stdout은 tool output일 뿐 사용자에게 자동 전달되지 않는다. stdout ack JSON에서 `rendered_markdown`만 추출해 사용자에게 그대로 보여준다. 이 메시지가 사용자에게 보이기 전에는 다음 `update_plan`, Step 1, Step 2, discovery, 파일 탐색, 또는 tool call을 하지 않는다. 한 줄짜리 "사이클 N 완료" 요약으로 대체하면 안 된다. `--loop` 또는 `--loop N`이면 user-visible brief를 보낸 뒤 ack의 `auto_promotions_count`로 loop 지속 여부를 판단한다.
 
@@ -331,7 +344,7 @@ Step 2가 **ALL CLEAR**를 반환하면 아래 순서로 ready 자동 승격 가
 3. 검토한 후보는 모두 `auto_promotion_candidates`에 기록한다. 자동 승격하지 않은 후보도 `eligible:false`와 이유를 남긴다.
 4. 자동 승격 가능한 후보가 있으면 파일 수정 전에 `"$RUN_HELPER" mutation-entry-check`를 호출해 cwd가 mutation 작업 위치로 안전한지 확인한다 (`ok:false`이면 hint대로 task worktree 생성 후 재진입). 통과하면 Step 4의 worktree 규칙을 적용하고, 새 branch를 `RUN_WORK_BRANCH`에 기록한다. base branch에서 직접 수정하지 않는다.
 5. authoritative roadmap/status 파일을 수정해 `ready`로 승격하고, 각 변경을 `auto_promotions`와 `changes`에 기록한다. 여러 후보가 같은 근거로 기계적으로 승격 가능하면 모두 승격한다.
-6. 승격 변경이 있으면 이번 cycle은 promotion-only cycle로 보고 Step 5부터 진행한다. 검증/리뷰/반영/PR merge gate는 일반 변경과 동일하게 적용한다. cycle 결과는 `result:"all_clear"`로 기록하고, `review_land`에는 승격 변경의 push/PR/merge 결과를 쓴다.
+6. 승격 변경이 있으면 이번 cycle은 promotion-only cycle로 보고 Step 5부터 진행한다. promotion-only cycle은 Step 4를 거치지 않으므로 status flip을 직접 수행한 main session agent로 여기서 `implementer`를 기록한다 (Claude Code=`claude` / Codex `$run`=`codex`) — Step 6 round-1 reviewer 선택의 입력이 된다. 검증/리뷰/반영/PR merge gate는 일반 변경과 동일하게 적용한다. cycle 결과는 `result:"all_clear"`로 기록하고, `review_land`에는 승격 변경의 push/PR/merge 결과를 쓴다.
 7. 승격 변경이 없으면 `result:"all_clear"` payload로 `finish-cycle-json`을 실행한 뒤 종료한다. 실제 탐색 행동과 결론은 `actions`/`conclusion`에 쓰고, Step 2의 후보는 `next_candidates`에 포함한다. 실제 리스크가 없으면 `risks: []`다.
 
 `--loop`가 아닌 실행에서는 자동 승격 후 새로 ready가 된 작업을 같은 invocation에서 구현하지 않는다. 승격 내역을 brief에 남기고 종료한다. `--loop` 실행에서는 승격 변경이 원격 반영된 뒤 user-visible brief를 보여주고 다음 cycle로 계속 진행한다.
@@ -356,7 +369,28 @@ Step 2가 **ALL CLEAR**를 반환하면 아래 순서로 ready 자동 승격 가
 
 - **Low**: main session이 1-3줄 design note를 `actions` 또는 `conclusion`에 남기고 Step 4로 간다.
 - **Medium**: main session이 최소 2개 대안을 비교하고 `design_risk` / `design_decisions`에 선택 근거를 남긴 뒤 Step 4로 간다.
-- **High**: 구현 전에 read-only design reviewer를 호출한다. 기본은 `/codex:rescue`; `--opus-review`가 있거나 같은 파일군에서 design disagreement가 반복되면 Opus read-only reviewer를 사용할 수 있다. reviewer 결과는 그대로 위임하지 말고 main session이 아래 matrix로 압축해 최종 결정을 잠근다.
+- **High**: design이 genuinely open(accepted DEC, locked design doc, ADR 등 설계 lock 없음)이면
+  구현 전에 **adversarial pingpong 설계 리뷰**(XAR-1Bb, Codex<->Claude)를 실행한다. pingpong-relay는
+  단일 full-auto 명령이 아니라 **per-turn `step` orchestrator**이므로 driver가 반복 구동한다:
+  (1) relay를 RUN_HELPER resolver와 동일하게 **repo root 기준**으로 resolve한다 (subdirectory
+  호출 대응, DEC-049 #6) — `$REPO_ROOT/.agents/scripts/pingpong-relay.sh` →
+  `$HOME/.agents/scripts/pingpong-relay.sh` → `$REPO_ROOT/scripts/pingpong-relay.sh`. (2) `adversarial_dialogue`
+  세션을 init하고 설계 질문을 initiator request로 넣는다. (3) `pingpong-relay.sh step --session <id>
+  --auto-relay --auto-decision --json`을 driver loop로 반복하되, **step이 실제로 진행 turn을 author한
+  동안에만 계속**한다(positive invariant). 그 외 모든 결과는 loop를 멈추고 emit JSON `status`로 분기한다 —
+  terminal/converged/cap(DEC-029 `RELAY_MAX_ROUNDS`=6 / `RELAY_MAX_MESSAGES`=20)이면 design verdict로,
+  `paused`/needs-user 등 비진행 status이면 사용자에게 surface, helper-rejection/subprocess/세션 오류 등
+  nonzero exit이나 relay 구동 불가이면 fallback(아래). 구체적 status 값·exit code 의미는 relay 헤더 +
+  `commands/pingpong.md`가 canonical이므로 여기서 열거하지 않는다(열거는 불완전해지기 쉽다).
+  (4) transcript를 design verdict로 압축한다.
+  세션/driver 패턴은 `commands/pingpong.md`와 relay 헤더 참조. `RELAY_MAX_ROUNDS`는 design용으로 낮춰도
+  되며 새 cost cap은 만들지 않는다. 이미 잠긴 설계를 구현하는 slice면 pingpong을 실행하지 않고 구현 계획을
+  locked design에 맞춰 검증만 한다. **relay design review를 실제로 구동할 수 없는 어떤 사유든**
+  — 경로에서 relay를 못 찾음, codex/claude subprocess 부재, sandbox 부재로 `step`이 exit 6/`no_sandbox`로
+  authoring 거부, 기타 step이 정상 진행 못 하는 exit — 이면 `/codex:rescue` 또는 같은 세션 read-only
+  design review로 fallback한다 (Step 6 Opus fallback과 동일한 capability adaptation; 규칙은 동일).
+  즉 pingpong은 실제로 authoring turn이 성공할 때만 사용하고, 그렇지 않으면 fallback이다. reviewer
+  결과는 그대로 위임하지 말고 main session이 아래 matrix로 압축해 최종 결정을 잠근다.
 
 ### Design Decision Matrix
 
@@ -393,6 +427,9 @@ Residual risk: manual repair remains operator-only
 
 - entry-check가 통과하면 cwd는 이미 task worktree 안이고, branch는 working branch이거나 비-base branch다. 새 작업 cycle을 시작하는 경우 작업 branch를 명시한다 (`codex/<short-description>` 또는 `<type>/<short-description>` 형태). 이미 working branch에 있으면 그대로 사용.
 - 작업 브랜치 이름은 `RUN_WORK_BRANCH`로 기록해 Step 8 push, Step 9 merge/cleanup에서 같은 브랜치를 사용한다.
+- 실제 diff를 작성한 구현 주체를 `implementer`로 기록한다. 값은 `codex` 또는 `claude`다.
+  Codex 위임/직접 Codex 작성은 `codex`, Claude Code/Opus main session 직접 구현은 `claude`다.
+  이 값으로 Step 6 round-1의 반대편 reviewer를 고른다.
 - Step 3.5에서 medium/high design decision matrix가 작성됐다면 그 invariant와 required tests를 구현 scope에 포함한다. 구현 중 선택한 pattern이 틀렸다고 드러나면 조용히 우회하지 말고 Step 3.5 matrix를 갱신한 뒤 계속한다.
 - Step 2의 task/slice를 구현한다. docs update가 acceptance criteria면 같은 cycle에서 처리한다.
 - 모델 라우팅이 가능해도 구현 handoff가 현재 작업 맥락보다 커지면 sub-agent를 만들지 말고 main/Sonnet execution에서 최소 diff로 수정한다.
@@ -431,11 +468,28 @@ REVIEW_DOSSIER_JSON="$("$RUN_HELPER" review-dossier)"
 | 조건 | 리뷰어 |
 |------|--------|
 | `--opus-review` | Opus sub-agent (Codex 리뷰 스킵) |
-| 1~2회차 기본 | `/codex:adversarial-review --base "$REVIEW_BASE" --model gpt-5.5` |
-| 3회차~ 기본 | `/codex:review --base "$REVIEW_BASE" --model gpt-5.5` |
+| small local-only (`--opus-review` 부재) | Step 6 로컬 review loop skip; Step 7 -> Step 8 -> Step 9 |
+| 1회차, `implementer=codex` | Opus sub-agent; Opus 없는 surface는 Codex fallback |
+| 1회차, `implementer=claude` | `/codex:adversarial-review --base "$REVIEW_BASE" --model gpt-5.5` |
+| 2~3회차 기본 | `/codex:adversarial-review --base "$REVIEW_BASE" --model gpt-5.5` |
+| 4회차~ 기본 | `/codex:review --base "$REVIEW_BASE" --model gpt-5.5` |
 
 Codex 리뷰어는 항상 `--model gpt-5.5`를 명시적으로 전달한다. 사용자별 `~/.codex/config.toml` default model이 달라도 run Step 6 리뷰는 동일한 reviewer 모델로 고정되어, cycle 간 finding 품질이 model 선택에 의해 흔들리지 않도록 한다.
 
+- small local-only는 `--opus-review`가 없을 때만, 그리고 나머지 reviewer row보다 먼저 판정한다.
+  `--opus-review`가 있으면 small이어도 skip하지 않고 Step 6 Opus review를 수행한다(flag가 명시한 리뷰 보장).
+  small 판정 조건은 `Impact: local only`, 위험 trigger 0개,
+  dossier small diff가 모두 참인 경우다.
+  dossier small diff는 `review_dossier.summary.changed_lines <= 200`이고
+  `review_dossier.summary.changed_files_count <= 5`인 상태다. 이 경우 Step 6만 건너뛰고
+  Step 7 -> Step 8(PR open, `PR_NUMBER` 초기화) -> Step 9(PR codex review)로 진행한다.
+  Step 8은 Step 9가 소비할 PR을 만들기 때문에 건너뛰지 않는다. 단 사용자가 publish
+  금지를 지시해 Step 8이 PR 없이 멈추는 경우엔 Step 9 PR review가 없으므로 small-skip을
+  적용하지 않고 Step 6 로컬 review를 수행한다 — skip은 Step 9가 실제로 실행될 때만 유효하다.
+- 현재 surface에 Opus sub-agent가 없으면 `implementer=codex` round-1은
+  `/codex:adversarial-review --base "$REVIEW_BASE" --model gpt-5.5`로 fallback한다.
+  이는 Codex `$run` surface의 capability adaptation이며, 규칙 자체는 구현자 반대편
+  reviewer를 고른다는 동일한 contract다.
 - 리뷰어(Codex 또는 Opus)에게 넘기는 입력은 full repo가 아니라 `CHANGE_SCOPE_JSON.review_inputs`, dossier summary/risk triggers, 필요한 call site/검증 출력으로 제한한다. 이전 pass의 전체 transcript를 재사용하지 말고, 필요한 경우 이전 actionable finding 요약만 넘긴다.
 - Step 3.5에서 `design_risk` / `design_decisions`를 만들었다면 reviewer 입력에 matrix와 residual risk를 포함한다. reviewer에게 "corner를 찾아라"만 요청하지 말고, 각 corner의 chosen pattern / invariant / required tests가 구현됐는지 검증하게 한다.
 - 모든 repo는 같은 입력 규칙을 쓴다. commit 전 local diff와 untracked files가 있으면 반드시 포함한다.
@@ -446,7 +500,7 @@ Codex 리뷰어는 항상 `--model gpt-5.5`를 명시적으로 전달한다. 사
 - 유효한 finding은 가장 합리적인 해결 방식을 고른다: root-cause code fix, test 보강, 문서/계약 정정, 요구사항 clarification, 또는 사용자 결정 요청. 리뷰를 만족시키려고 보안/검증/계약을 약화하거나 symptom-only patch를 만들지 않는다.
 ### Review Loop
 
-**Step 6 pass 조건: 리뷰어가 직접 실행되어 actionable finding 0을 반환한 경우에만 통과한다.** finding을 수정했다고 스스로 "pass"를 선언하는 것은 금지다. 수정 후에는 반드시 리뷰어를 재실행해야 한다.
+**Step 6 pass 조건: 리뷰어가 직접 실행되어 actionable finding 0을 반환한 경우에만 통과한다.** finding을 수정했다고 스스로 "pass"를 선언하는 것은 금지다. 수정 후에는 반드시 리뷰어를 재실행해야 한다. **예외 — small-skip**: small local-only(+`--opus-review` 부재 + publish 예정으로 Step 9가 실제 실행)로 판정돼 Step 6 로컬 review를 건너뛴 cycle은 이 pass 조건의 명시적 예외다 — 로컬 reviewer를 실행하지 않고 Step 7→8→9로 진행하며 리뷰는 Step 9 PR codex review가 담당한다. 그 외 모든 cycle은 위 pass 조건을 그대로 강제한다.
 
 각 pass는 다음 순서를 엄격히 따른다:
 
@@ -463,7 +517,9 @@ fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로
 
 - **3회차**: 같은 파일군 또는 같은 risk class에서 반복 finding이 있으면 Step 3.5 matrix를 다시 열고, 누락된 pattern/invariant/test를 명시한다.
 - **5회차**: 사용자에게 짧은 중간 브리핑을 남긴다. 현재 유효 finding 수, 반복되는 risk class, design regroup 여부, 다음 pass 목표를 기록한다.
-- **8회차**: design issue가 아직 새로 발견되는 중이면 read-only design reviewer(`/codex:rescue` 또는 Opus)를 호출하거나, 사용자 결정이 필요한 항목을 issue로 분리한다. 단순히 review command만 계속 반복하지 않는다.
+- **8회차**: design issue가 아직 새로 발견되는 중이면 Step 3.5 High route의
+  read-only design reviewer를 호출하거나, 사용자 결정이 필요한 항목을 issue로 분리한다.
+  단순히 review command만 계속 반복하지 않는다.
 - **12회차 이후**: normal review loop가 아니라 incident mode로 취급한다. 남은 finding을 root cause category로 묶고, 계속 진행/분리/중단 중 안전한 선택지를 사용자에게 보고한다.
 
 합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. pass 횟수는 매 pass 시작 시 TodoWrite 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다.
