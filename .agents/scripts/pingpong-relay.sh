@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pingpong-relay.sh — XAR-1Bb.1 true auto-relay orchestrator (adversarial only).
+# pingpong-relay.sh — true auto-relay orchestrator (adversarial + parallel; XAR-1Bb).
 #
 # One invocation = exactly ONE protocol turn (whose-turn → subprocess author →
 # helper write → emit next state → return). The driver (a parent agent chat or
@@ -16,10 +16,17 @@
 # boundary, G4 real write-probe, stdin-file prompt, portable timeout +
 # process-group kill, CLI-specific output capture).
 #
-# Topology: adversarial_dialogue ONLY. parallel_review auto (synthesis +
-# decision draft) is XAR-1Bb.4. The decision in parallel_review is sender=user
-# (DEC-043/Q-052), which cannot be agent-authored, so this orchestrator refuses
-# parallel_review sessions.
+# Topologies: BOTH adversarial_dialogue and parallel_review are supported
+# (parallel auto-relay landed XAR-1Bb.4/DEC-047; auto-relay is the default per
+# DEC-054). parallel_review auto-relay collects both responses, then emits a
+# synthesis (orchestrator-only) plus a decision DRAFT. The ONLY parallel
+# restriction is auto-DECISION: the parallel decision is sender=user
+# (DEC-043/Q-052), so its final disposition stays confirm-required and is never
+# agent-authored — the session itself is NOT refused.
+#
+# Capability SSOT is the `capabilities --session <id>` subcommand (derived from
+# code per session). This header describes mechanism only; it is not the
+# authoritative support matrix — query the subcommand for what a session allows.
 #
 # Mutation authority is explicit: the subprocess returns body JSON text only;
 # this orchestrator persists EXCLUSIVELY through `agent-dialog.sh write`, which
@@ -28,9 +35,16 @@
 # state directly.
 #
 # Subcommands:
-#   capabilities --session <id> [--manual] [--auto-decision] [--json]
-#   step         --session <id> [--manual] [--auto-decision]
+#   capabilities --session <id> [--manual] [--auto-decision] [--keychain-auth] [--json]
+#   step         --session <id> [--manual] [--auto-decision] [--keychain-auth]
 #                [--instructions-file <path>] [--json] [--dry-run]
+#
+# --keychain-auth (DEC-059, opt-in, default off): on macOS, authenticate the
+# sandboxed claude subprocess (needed for --auto-decision turns) by extracting
+# ONLY claudeAiOauth from the login Keychain into the scratch credential — never
+# the unrelated mcpOAuth.* secrets in the same item. Without it, claude turns on
+# Keychain-only setups fail "Not logged in" and must be authored manually (or
+# provide CLAUDE_CODE_OAUTH_TOKEN / ~/.claude/.credentials.json).
 #
 # auto-relay is the DEFAULT (DEC-054): a bare `step` collects/relays the turn.
 # Pass --manual (alias --no-auto-relay) to opt out to per-turn pausing.
@@ -54,6 +68,7 @@
 #   RELAY_SANDBOX         auto | off  (default: auto; macOS uses sandbox-exec)
 #   RELAY_MAX_ROUNDS      DEC-029 primary cap (default: 6)
 #   RELAY_MAX_MESSAGES    DEC-029 secondary flood fuse (default: 20)
+#   RELAY_CLAUDE_KEYCHAIN 1|true to default --keychain-auth on (DEC-059; default off)
 #   RELAY_REVIEWER_CMD    test hook: full reviewer command override (argv[0..]);
 #                         when set, used verbatim for BOTH agents and sandbox is
 #                         bypassed (stub-binary unit tests). Prompt is still fed
@@ -72,6 +87,15 @@ RELAY_TIMEOUT_SECS="${RELAY_TIMEOUT_SECS:-180}"
 RELAY_SANDBOX="${RELAY_SANDBOX:-auto}"
 RELAY_MAX_ROUNDS="${RELAY_MAX_ROUNDS:-6}"
 RELAY_MAX_MESSAGES="${RELAY_MAX_MESSAGES:-20}"
+
+# Opt-in (default OFF): on macOS, reconstruct claude's scratch credential from
+# the login Keychain when no file-based credential exists, extracting ONLY the
+# claudeAiOauth subtree — NOT mcpOAuth.* (the same "Claude Code-credentials"
+# Keychain item also holds unrelated third-party secrets, e.g. Supabase MCP
+# clientSecret/refreshToken). Default off keeps the sandbox secret-exclusion
+# boundary (DEC-045/048) intact unless the operator explicitly opts in via
+# --keychain-auth or RELAY_CLAUDE_KEYCHAIN=1. See DEC-059.
+case "${RELAY_CLAUDE_KEYCHAIN:-}" in 1|true|yes|on) KEYCHAIN_AUTH=true ;; *) KEYCHAIN_AUTH=false ;; esac
 
 RELAY_SBX=()   # sandbox argv prefix (populated by _sandbox_prefix)
 RELAY_CLI=()   # reviewer CLI argv (populated by _build_cli_argv)
@@ -284,6 +308,26 @@ _redirect_cli_home() {
       mkdir -p "$dst"
       [ -f "$src/.credentials.json" ] && cp "$src/.credentials.json" "$dst/" 2>/dev/null || true
       [ -f "$src/settings.json" ]     && cp "$src/settings.json"     "$dst/" 2>/dev/null || true
+      # Opt-in Keychain auth (DEC-059): when no file-based credential was copied
+      # and the operator opted in, reconstruct .credentials.json from the macOS
+      # login Keychain — extracting ONLY claudeAiOauth via `jq select`, so the
+      # unrelated mcpOAuth.* secrets in the same Keychain item (e.g. Supabase MCP
+      # clientSecret) NEVER reach the sandboxed subprocess. The token never hits
+      # stdout/logs (security|jq writes straight to the file); chmod 600. Any
+      # failure (no item, bad JSON, missing claudeAiOauth, non-macOS) leaves no
+      # file and degrades to the existing "Not logged in" diagnostic.
+      if [ "$KEYCHAIN_AUTH" = "true" ] && [ ! -f "$dst/.credentials.json" ] \
+         && [ "$(uname -s)" = "Darwin" ] \
+         && command -v security >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        if security find-generic-password -w -s "Claude Code-credentials" 2>/dev/null \
+             | jq -e 'select(.claudeAiOauth|type=="object") | {claudeAiOauth}' \
+                 >"$dst/.credentials.json" 2>/dev/null \
+           && [ -s "$dst/.credentials.json" ]; then
+          chmod 600 "$dst/.credentials.json" 2>/dev/null || true
+        else
+          rm -f "$dst/.credentials.json" 2>/dev/null || true
+        fi
+      fi
       RELAY_ENV+=("CLAUDE_CONFIG_DIR=$dst")
       ;;
   esac
@@ -706,6 +750,7 @@ cmd_capabilities() {
     --auto-relay) shift ;;  # no-op: auto-relay is the default (DEC-054); kept for backward compat
     --manual|--no-auto-relay) auto_relay="false"; shift ;;  # explicit opt-out always wins, order-independent
     --auto-decision) auto_decision="true"; shift ;;
+    --keychain-auth) KEYCHAIN_AUTH=true; shift ;;  # opt-in macOS Keychain auth for claude (DEC-059)
     --json) json="true"; shift ;;
     *) die 2 "capabilities: unknown arg: $1" ;;
   esac; done
@@ -732,8 +777,9 @@ cmd_capabilities() {
   if [ "$json" = "true" ]; then
     jq -n --arg dmode "$dmode" --arg caps "$caps" --arg sbx "$sbx" \
       --argjson ar "$auto_relay" --argjson ad "$auto_decision" \
+      --argjson kc "$KEYCHAIN_AUTH" \
       '{dialogue_mode:$dmode, capabilities:$caps, sandbox:$sbx,
-        auto_relay:$ar, auto_decision:$ad}'
+        auto_relay:$ar, auto_decision:$ad, keychain_auth:$kc}'
   else
     printf 'topology: %s\ncapabilities: %s\nsandbox: %s\n' "$dmode" "$caps" "$sbx"
   fi
@@ -1146,6 +1192,7 @@ cmd_step() {
     --auto-relay) shift ;;  # no-op: auto-relay is the default (DEC-054); kept for backward compat
     --manual|--no-auto-relay) auto_relay="false"; shift ;;  # explicit opt-out always wins, order-independent
     --auto-decision) auto_decision="true"; shift ;;
+    --keychain-auth) KEYCHAIN_AUTH=true; shift ;;  # opt-in macOS Keychain auth for claude (DEC-059)
     --instructions-file) instr_file="$2"; shift 2 ;;
     --intervene) intervene="$2"; shift 2 ;;
     --control-file) control_file="$2"; shift 2 ;;

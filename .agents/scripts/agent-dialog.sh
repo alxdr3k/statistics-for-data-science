@@ -1917,7 +1917,12 @@ cmd_init() {
     if git -C "$repo" rev-parse HEAD >/dev/null 2>&1; then
       head_sha="$(git -C "$repo" rev-parse HEAD)"
     fi
-    repo_json="$(jq -n --arg path "$repo" --arg head "$head_sha" '{path: $path, head_sha: ($head | select(length > 0)) }')"
+    # Include head_sha only when non-empty. A bare `select(length > 0)` inside
+    # object construction emits an empty stream on empty input, which cancels the
+    # ENTIRE object — repo_json would become "" and the `--argjson repo` below
+    # dies with "invalid JSON text". Add the key conditionally instead so the
+    # object always survives (omit head_sha when empty, matching prior intent).
+    repo_json="$(jq -n --arg path "$repo" --arg head "$head_sha" '{path: $path} + (if $head == "" then {} else {head_sha: $head} end)')"
   fi
 
   # XAR-1A.7 (B) collision-resolving rename: the old `mode` field carried

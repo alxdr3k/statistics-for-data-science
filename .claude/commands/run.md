@@ -465,6 +465,32 @@ REVIEW_DOSSIER_JSON="$("$RUN_HELPER" review-dossier)"
 
 - `REVIEW_DOSSIER_JSON.review_dossier`는 diff 크기, 파일 확산, 계약/중요 경로처럼 script가 계산 가능한 신호만 담는다. dossier가 없거나 helper가 실패하면 `CHANGE_SCOPE_JSON`과 아래 위험 trigger를 수동으로 적용한다.
 
+### Pre-review gate — commit-before-review (필수)
+
+`/codex:adversarial-review --base "$REVIEW_BASE"`는 **committed** `<base>...HEAD` diff를 스스로 계산해 verdict 근거로 삼는다 (codex `--base` = base-branch scope). commit이 Step 8(Land)에만 있던 과거 순서에서는 Step 6 시점 변경이 uncommitted라 codex가 보는 branch diff가 비어, 실제 변경을 공격하지 않은 채 vacuous approve가 났다 (실증 XAR 20260620-144510). 문서로 "commit 전 local diff도 입력에 포함하라"고 적어도 codex의 verdict scope는 못 바꾸므로, 이 정합은 **기계적으로 강제**한다.
+
+따라서 Step 6에서 reviewer(Codex 또는 Opus)를 호출하기 전에 (아래 small-skip cycle 제외) 다음을 보장한다:
+
+1. **로컬 체크 선행**: Step 7의 로컬/검증 체크를 먼저 돌린다. formatter·test·generated docs가 파일을 mutate하면 review 후 commit이 reviewed target과 달라지므로, 검증은 reviewed commit 생성 *전*에 끝낸다.
+2. **의도한 변경을 모두 commit/amend**: working branch라 첫 commit, 이후 finding 수정 round는 amend (feature branch이므로 reversible).
+3. **review target 게이트 통과**: reviewer 호출 직전에 아래를 실행하고 **exit status로 게이트**한다 (출력 문구가 아니라 exit code로 분기).
+
+   ```bash
+   "$RUN_HELPER" review-target-check   # exit 0 = ok; exit 3 = invalid (재커밋/정리 필요)
+   ```
+
+   `review-target-check`는 (a) committed `<base>...HEAD` diff가 **non-empty**이고 (b) worktree가 **clean**(staged/unstaged/untracked 잔존 0)일 때만 exit 0이다. branch diff가 비었으면(`reason:"branch_diff_empty"`) codex가 빈 diff를 vacuously approve하고, worktree가 dirty면(`reason:"dirty_worktree"`) reviewed HEAD가 shipped tree와 달라진다. triple-dot `<base>...HEAD`가 계산 불가면(no merge base; `reason:"merge_base_unavailable"`) two-dot fallback 없이 fail-closed한다 — base에 rebase한 뒤 다시 게이트한다. exit 3이면 reviewer를 호출하지 말고 `hint`대로 조치한 뒤 다시 게이트한다. codex 출력 문구("nothing to review" 등)로 판정하지 않는다 — 출력 파싱은 fragile하다.
+4. **reviewer 입력 재계산**: 게이트 통과(commit 확정) 후 reviewer 입력을 committed HEAD 기준으로 **다시 계산**한다. 위 도입부에서 commit 전에 계산한 `CHANGE_SCOPE_JSON`/`REVIEW_DOSSIER_JSON`은 로컬 체크가 generated docs·formatter로 mutate한 파일이 commit에 포함되면 stale이 되어, reviewer가 reviewed commit에 없는/있는 파일을 놓친 dossier를 받게 된다.
+
+   ```bash
+   CHANGE_SCOPE_JSON="$("$RUN_HELPER" change-scope)"
+   REVIEW_DOSSIER_JSON="$("$RUN_HELPER" review-dossier)"
+   ```
+
+   (도입부 계산값은 small-skip 판정용 잠정값이고, reviewer에게 주는 dossier/review_inputs는 이 재계산값을 쓴다.)
+
+finding을 수정한 다음 pass는 **fix → 로컬 체크 → amend → `review-target-check` → reviewer 재실행** 순서를 그대로 반복한다. amend로 HEAD가 바뀌므로 매 pass마다 게이트를 다시 통과해야 한다. **small-skip cycle은 Step 6를 건너뛰므로 이 게이트도 적용되지 않는다** — 그 경우 commit은 Step 8에서 일어나고 리뷰는 Step 9 PR codex review(committed branch)가 담당하므로 빈 diff 문제가 없다.
+
 ### 리뷰어 선택
 
 | 조건 | 리뷰어 |
@@ -497,7 +523,7 @@ REVIEW_DOSSIER_JSON="$("$RUN_HELPER" review-dossier)"
   reviewer를 고른다는 동일한 contract다.
 - 리뷰어(Codex 또는 Opus)에게 넘기는 입력은 full repo가 아니라 `CHANGE_SCOPE_JSON.review_inputs`, dossier summary/risk triggers, 필요한 call site/검증 출력으로 제한한다. 이전 pass의 전체 transcript를 재사용하지 말고, 필요한 경우 이전 actionable finding 요약만 넘긴다.
 - Step 3.5에서 `design_risk` / `design_decisions`를 만들었다면 reviewer 입력에 matrix와 residual risk를 포함한다. reviewer에게 "corner를 찾아라"만 요청하지 말고, 각 corner의 chosen pattern / invariant / required tests가 구현됐는지 검증하게 한다.
-- 모든 repo는 같은 입력 규칙을 쓴다. commit 전 local diff와 untracked files가 있으면 반드시 포함한다.
+- 모든 repo는 같은 입력 규칙을 쓴다. 위 Pre-review gate를 통과하면 worktree는 clean하고 의도한 변경은 모두 committed HEAD에 있으므로, Review Pass 입력은 committed `<base>...HEAD`다 (`CHANGE_SCOPE_JSON.review_inputs`의 base_range). reviewer가 committed HEAD를 리뷰하게 해 Step 9 PR review와 review target을 일치시킨다.
 - Review Pass는 diff review와 impact triage/scan이 함께 통과한 상태다.
 - Impact triage: docs/typo/slice/test-only처럼 외부 surface가 없으면 `Impact: local only`로 끝낸다.
 - 위험 trigger: shared helper/API, command/skill, deploy/build/test infra, config/env/schema, persistence, auth/security, public CLI/output, 파일 경로/계약 변경, 변경 파일 5개 초과. 해당하면 변경된 symbol/path/env/command를 `rg`로 repo 전체에서 추적해 call site/docs/tests/deploy refs를 확인한다.
@@ -538,9 +564,10 @@ fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로
   read-only design reviewer를 호출하거나, 사용자 결정이 필요한 항목을 issue로 분리한다.
   단순히 review command만 계속 반복하지 않는다.
 - **12회차 이후**: normal review loop가 아니라 incident mode로 취급한다. 남은 finding을 root cause category로 묶고, 계속 진행/분리/중단 중 안전한 선택지를 사용자에게 보고한다.
+- **starvation/thrash 트립와이어 (DEC-060)**: **design-doc/spec 슬라이스(아래 DEC-058 게이트 통과분)에만 적용**한다 — '내부모순'은 design-doc acceptance 조건 (b)의 메트릭이라 code 슬라이스(강한 0-actionable)에는 해당 없다(code 슬라이스의 반복 same-shape finding은 본 tripwire가 아니라 위 **3회차 regroup**으로 다룬다). 위 design-doc acceptance의 2-clean 종료를 보완해, 모순이 **수렴 못 하고 정체**할 때 무한 per-finding 패치(starvation)를 막는다. 두 트리거 중 하나라도 발화하면 — (a) **count 트리거**: 내부모순 finding 수가 **양수이면서**(0은 clean — 2-clean 종료 경로지 tripwire가 아니다) **N=3 라운드 연속 줄지 않음**; (b) **recurrence 트리거**: 같은 위치·같은 주장(same-shape finding)이 fix 후 재발 — per-finding 패치를 멈추고 **1회 holistic propagation sweep + 핵심 용어 self-grep**(권위 섹션 ↔ summary ↔ DEC ↔ acceptance ↔ tracking 일관성)으로 전환한 뒤 재리뷰한다. **post-sweep 종료 판정은 트리거별로 한다**: count는 sweep 후에도 모순 수가 안 줄면 `needs_user`로 escalate, **줄었으면 design-doc acceptance 정상 경로로 복귀**; recurrence는 sweep 후 재리뷰에서 같은 finding이 또 재발하면 `needs_user`로 escalate, **사라졌으면 정상 복귀**. 이는 **accept 트리거가 아니라 접근-전환 트리거** — 모순·ship-blocker(DEC-058 (b) 내부모순)는 여전히 ship하지 않는다. **N=3은 binding**(양 surface 동일; config/tunability화는 후속). 라운드별 모순 수와 same-shape finding fingerprint를 review pass 추적 기록(위 20회 카운터와 같은 위치)에 남겨 context reset 후에도 N=3·재발을 평가한다. 이 통제 체계를 **two-tier**로 명명한다: **hard gate**(객관 산출물 검사 — 재리뷰 전 propagation-consistency self-grep[L1], 검증 게이트 exit-code/pipefail[L2]) + **advisory tripwire**(본 cross-round same-shape 감지[L3]). authoritative 정의·근거는 DEC-060(여기서 재나열하지 않아 drift 방지).
 - **design-doc/spec 슬라이스 (DEC-058)**: 위 게이트를 통과한 슬라이스는 **numbered loop step 3 design-doc 분기**가 종료를 정한다(2-clean·내부모순 0·residual 등록 — authoritative 정의는 거기, 여기서 재정의하지 않음). 이 종료는 5/8/12회차 incident 단계보다 먼저 조건 충족 즉시 적용 가능하다(불필요한 라운드 방지). 내부 모순 잔존 시 종료 불가(ship-blocker). executable 계약(`commands/**`·`codex/skills/**`·`scripts/**` 등)은 게이트 (iv)로 제외되어 강한 "0 actionable"를 그대로 적용한다.
 
-합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. **단 design-doc/spec 슬라이스의 architecture 반증·내부 모순(위 design-doc acceptance (a)/(b) ship-blocker)은 이 20회 escape의 예외다 (DEC-058)** — issue+Step 7로 우회할 수 없고 반드시 해소한다. 20회 escape는 이미 impl-scoped된 residual precision, 또는 사용자가 명시 승인한 disagreement에만 적용한다(ship-blocker는 cap을 채워도 blocking 유지). pass 횟수는 매 pass 시작 시 TodoWrite 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다. **design-doc/spec 슬라이스는 추가로 TodoWrite에 `design-doc clean streak X/2`, 마지막으로 리뷰한 **review-input fingerprint**, 등록한 residual impl-scope 항목 ID(이슈/슬라이스)를 남긴다 (F-A8/F-A9)**. fingerprint는 `base + HEAD + staged diff + unstaged diff + untracked 파일 내용/이름`의 해시다 — Step 6는 commit 전 local diff·untracked를 리뷰하므로 commit SHA/base만으론 uncommitted 편집(doc/deferral 포함)을 구분 못 한다. **복원은 content-addressed deterministic이다: 현재 review-input fingerprint == 마지막 리뷰 fingerprint일 때만 clean streak를 유지하고, 불일치면 (human-readable reset note 유무와 무관하게) 무조건 `design-doc clean streak 0/2`로 reset**한다 — 1 clean 조기 accept나 stale pre-edit clean 카운트를 막는다. canonical fingerprint recipe(정확한 직렬화·파일 정렬·base identity·binary 처리)와 이를 산출하는 run-helper 필드는 **후속(이슈 #122, impl-precision)** — 그때까지는 agent가 위 inputs에 deterministic hash를 계산하되, **계산이 모호하거나 신뢰 불가하면 보수적으로 `0/2` reset**한다(fail-safe — stale clean 유지보다 재리뷰가 안전).
+합리적인 finding이 더 이상 나오지 않을 때까지 반복하되 hard upper는 20회다. 사용자 결정이 필요한 finding, 또는 fix를 적용했는데 같은 위치에 같은 주장이 다시 올라와 합의가 어려운 disagreement는 GitHub issue로 남기고 Step 7로 간다. 20회를 채우고도 남은 actionable finding이 있으면 GitHub issue로 남기고 Step 7로 간다. **단 design-doc/spec 슬라이스의 architecture 반증·내부 모순(위 design-doc acceptance (a)/(b) ship-blocker)은 이 20회 escape의 예외다 (DEC-058)** — issue+Step 7로 우회할 수 없고 반드시 해소한다. 20회 escape는 이미 impl-scoped된 residual precision, 또는 사용자가 명시 승인한 disagreement에만 적용한다(ship-blocker는 cap을 채워도 blocking 유지). pass 횟수는 매 pass 시작 시 TodoWrite 체크박스에 `[Review pass N/20]` 형태로 기록해 context reset 이후에도 복원할 수 있도록 한다. **design-doc/spec 슬라이스는 추가로 TodoWrite에 `design-doc clean streak X/2`, 마지막으로 리뷰한 **review-input fingerprint**, 등록한 residual impl-scope 항목 ID(이슈/슬라이스)를 남긴다 (F-A8/F-A9)**. fingerprint는 `review base OID + reviewed HEAD(또는 tree) OID + review scope/command + clean-worktree status`의 해시다 — Pre-review gate가 worktree를 clean하게 강제하므로(staged/unstaged/untracked 0) reviewed identity는 committed HEAD로 결정되고, amend나 base 변경은 HEAD/base OID를 바꿔 prior acceptance·clean-streak를 무효화한다(`review-target-check`의 `base_oid`/`head`/`range_command` 출력이 그 identity를 제공한다). **복원은 content-addressed deterministic이다: 현재 review-input fingerprint == 마지막 리뷰 fingerprint일 때만 clean streak를 유지하고, 불일치면 (human-readable reset note 유무와 무관하게) 무조건 `design-doc clean streak 0/2`로 reset**한다 — 1 clean 조기 accept나 stale pre-edit clean 카운트를 막는다. canonical fingerprint recipe(정확한 직렬화·파일 정렬·base identity·binary 처리)와 이를 산출하는 run-helper 필드는 **후속(이슈 #122, impl-precision)** — 그때까지는 agent가 위 inputs에 deterministic hash를 계산하되, **계산이 모호하거나 신뢰 불가하면 보수적으로 `0/2` reset**한다(fail-safe — stale clean 유지보다 재리뷰가 안전).
 
 ## Step 7 - Local Checks
 
@@ -549,10 +576,11 @@ fix가 surface를 넓히지 않았으면 다음 pass는 추가 diff 중심으로
 - `full_ci_required == true`: repo guidance와 docs/testing에 정의된 full/pre-PR 검증을 실행한다.
 - `full_ci_required == false`: Step 5에서 정한 문서/계약 검증 프로필만 반복한다. docs-only 변경 때문에 의미 없는 unit/app CI나 전체 CI를 기본 실행하지 않는다.
 - 실패하면 수정 후 Step 5 또는 Step 7의 관련 검증을 반복한다.
+- **Step 6를 실행한 cycle의 post-review mutation 재라우팅**: Step 6 review를 통과한 뒤 Step 7 재검증이 실패해 수정하거나 formatter·generated docs가 파일을 mutate하면, 그 변경은 reviewed HEAD를 우회해 land될 수 없다. 반드시 amend → `review-target-check` → reviewer 재실행(Step 6 Pre-review gate 루프)을 다시 거친 뒤 Step 8로 간다. reviewed HEAD 이후의 uncommitted/un-reviewed 변경을 Step 8에서 push하지 않는다. (small-skip cycle은 Step 6를 거치지 않으므로 해당 없음 — Step 9 PR codex review가 committed branch를 본다.)
 
 ## Step 8 - Land
 
-- 의도한 파일만 stage, commit, `RUN_WORK_BRANCH` push. 이어서 PR body를 `PR_BODY_FILE` 경로의 파일로 작성하고 (아래 'Test plan 섹션' 참고) `check-test-plan`을 통과한 뒤 `gh pr create`로 **draft가 아닌 open PR**을 생성한다. 생성 결과 URL에서 PR 번호를 추출해 `PR_NUMBER`에 저장하고 Step 9에서 같은 변수를 사용한다.
+- 의도한 파일만 stage하고 commit한다 — Step 6를 실행한 cycle은 Pre-review gate에서 이미 commit/amend됐고 worktree가 clean하므로 추가 commit 없이 그대로 사용하고, small-skip cycle만 여기서 commit한다. 그런 다음 `RUN_WORK_BRANCH`를 push한다. 이어서 PR body를 `PR_BODY_FILE` 경로의 파일로 작성하고 (아래 'Test plan 섹션' 참고) `check-test-plan`을 통과한 뒤 `gh pr create`로 **draft가 아닌 open PR**을 생성한다. 생성 결과 URL에서 PR 번호를 추출해 `PR_NUMBER`에 저장하고 Step 9에서 같은 변수를 사용한다.
 
   ```bash
   PR_BODY_FILE="$(mktemp -t run-pr-body-XXXXXX.md)"

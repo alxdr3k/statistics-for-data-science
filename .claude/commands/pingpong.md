@@ -628,6 +628,14 @@ turn 본문을 **자동 author**한다 (LLM authoring 자동화). v1 골격은
   off), `--auto-decision`(initiator가 decision까지 author — 0-input adversarial
   cycle; opt-in 유지). `capabilities --session <sid>`가 topology별 가용 능력 +
   sandbox 상태를 출력한다 (`auto_relay`는 기본 true로 보고).
+- **claude 인증 (DEC-059)**: `--auto-decision`의 claude decision turn은
+  sandboxed claude 인증이 필요한데, macOS는 claude가 Keychain 전용 인증이라
+  sandbox(secret 경계)가 못 가져가 "Not logged in"으로 실패할 수 있다(codex는
+  파일 `auth.json`이라 정상). 해결: `CLAUDE_CODE_OAUTH_TOKEN`(또는
+  `ANTHROPIC_API_KEY`) export, `~/.claude/.credentials.json` 제공, **또는**
+  opt-in `--keychain-auth`(= `RELAY_CLAUDE_KEYCHAIN=1`, **기본 off**)로 Keychain
+  의 `claudeAiOauth`만 추출해 scratch credential 재구성(같은 항목의 `mcpOAuth.*`
+  타사 비밀은 절대 미전달). 미설정 시 그 turn은 수동 작성으로 fallback.
 - **mutation authority**: subprocess는 body JSON만 반환하고 persist는
   `agent-dialog.sh write` 경유만 — 기존 redaction/role/sequencing/lock
   validation을 전부 통과해야 하며 거부 시 step이 멈추고 보고한다 (exit 5).

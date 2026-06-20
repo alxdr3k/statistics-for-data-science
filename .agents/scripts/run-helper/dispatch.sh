@@ -12,6 +12,7 @@ commands:
   mutation-entry-check
   change-scope
   review-dossier
+  review-target-check
   sync
   init-brief
   validate-brief <run-id> <brief-log>
@@ -37,6 +38,7 @@ run_helper_main() {
     mutation-entry-check) mutation_entry_check ;;
     change-scope) change_scope ;;
     review-dossier) review_dossier ;;
+    review-target-check) review_target_check ;;
     sync) sync_repo ;;
     init-brief) init_brief ;;
     validate-brief) shift; validate_brief "$@" ;;

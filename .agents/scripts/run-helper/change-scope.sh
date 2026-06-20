@@ -203,6 +203,149 @@ change_scope() {
   fi
 }
 
+# Step 6 pre-review gate (XAR pingpong 20260620-144510, DEC: commit-before-review).
+# `/codex:adversarial-review --base <ref>` reviews the COMMITTED `<base>...HEAD`
+# diff: it self-computes that range and bases its verdict on it. When the run's
+# changes are still uncommitted (the old order committed only at Step 8/Land),
+# that branch diff is empty, so codex vacuously approves without attacking the
+# real change. Documentation alone could not prevent recurrence — the written
+# "include pre-commit local diff" rule never reached codex's verdict scope — so
+# the contract is machine-enforced here: a valid Step 6 review target requires
+# (a) a NON-EMPTY committed `<base>...HEAD` diff AND (b) a CLEAN worktree (no
+# staged/unstaged/untracked work), so the reviewed HEAD equals the shipped tree.
+# Exit 0 when ok; exit 3 when the target is invalid (caller gates on exit status,
+# not output text). Reuses review_base/review_range_ref/line_count.
+review_target_check() {
+  local type base range_ref tmp_dir committed staged unstaged untracked
+  local committed_count staged_count unstaged_count untracked_count dirty_count
+  local range_command range_form head_oid base_oid branch_diff_empty dirty ok reason
+  local triple_dot_failed
+  require_jq || return 1
+
+  type="$(repo_type)"
+  base="$(review_base)"
+  range_ref="$(review_range_ref "$type" "$base")"
+  range_command=""
+  range_form=""
+  tmp_dir="$(mktemp -d)" || return 1
+  committed="$tmp_dir/committed"
+  staged="$tmp_dir/staged"
+  unstaged="$tmp_dir/unstaged"
+  untracked="$tmp_dir/untracked"
+
+  : > "$committed"
+  triple_dot_failed=false
+  if [[ -n "$range_ref" ]]; then
+    if git diff --name-only "$range_ref...HEAD" > "$committed" 2>/dev/null; then
+      range_command="git diff $range_ref...HEAD"
+      range_form="triple_dot"
+    else
+      # No two-dot fallback for the gate (unlike change_scope). codex --base
+      # reviews the triple-dot `<base>...HEAD` scope; if the merge base is
+      # missing (orphan/unrelated history) triple-dot exits 128 while two-dot
+      # still succeeds, so falling back would green-light a target codex's own
+      # scope cannot reproduce. Fail closed instead.
+      : > "$committed"
+      range_form=""
+      triple_dot_failed=true
+    fi
+  fi
+  git diff --cached --name-only > "$staged"
+  git diff --name-only > "$unstaged"
+  git ls-files --others --exclude-standard > "$untracked"
+
+  committed_count="$(line_count "$committed")"
+  staged_count="$(line_count "$staged")"
+  unstaged_count="$(line_count "$unstaged")"
+  untracked_count="$(line_count "$untracked")"
+  dirty_count=$((staged_count + unstaged_count + untracked_count))
+
+  head_oid="$(git rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+  base_oid=""
+  if [[ -n "$range_ref" ]]; then
+    base_oid="$(git rev-parse --verify --quiet "$range_ref" 2>/dev/null || true)"
+  fi
+
+  branch_diff_empty=true
+  [[ "$committed_count" -gt 0 ]] && branch_diff_empty=false
+  dirty=false
+  [[ "$dirty_count" -gt 0 ]] && dirty=true
+
+  ok=true
+  reason="ok"
+  if [[ -z "$range_ref" ]]; then
+    ok=false
+    reason="review_base_unresolved"
+  elif [[ "$triple_dot_failed" == "true" ]]; then
+    ok=false
+    reason="merge_base_unavailable"
+  elif [[ "$branch_diff_empty" == "true" && "$dirty" == "true" ]]; then
+    ok=false
+    reason="branch_diff_empty_and_dirty_worktree"
+  elif [[ "$branch_diff_empty" == "true" ]]; then
+    ok=false
+    reason="branch_diff_empty"
+  elif [[ "$dirty" == "true" ]]; then
+    ok=false
+    reason="dirty_worktree"
+  fi
+
+  if jq -nc \
+    --arg review_base "$base" \
+    --arg range_ref "$range_ref" \
+    --arg range_command "$range_command" \
+    --arg range_form "$range_form" \
+    --arg head "$head_oid" \
+    --arg base_oid "$base_oid" \
+    --argjson committed_count "$committed_count" \
+    --argjson staged_count "$staged_count" \
+    --argjson unstaged_count "$unstaged_count" \
+    --argjson untracked_count "$untracked_count" \
+    --argjson branch_diff_empty "$branch_diff_empty" \
+    --argjson dirty "$dirty" \
+    --argjson ok "$ok" \
+    --arg reason "$reason" '
+    {
+      schema_version:1,
+      kind:"run_review_target_check",
+      ok:$ok,
+      reason:$reason,
+      review_base:$review_base,
+      range_ref:(if $range_ref == "" then null else $range_ref end),
+      range_command:(if $range_command == "" then null else $range_command end),
+      range_form:(if $range_form == "" then null else $range_form end),
+      base_oid:(if $base_oid == "" then null else $base_oid end),
+      head:(if $head == "" then null else $head end),
+      branch_diff_empty:$branch_diff_empty,
+      dirty:$dirty,
+      counts:{
+        committed:$committed_count,
+        staged:$staged_count,
+        unstaged:$unstaged_count,
+        untracked:$untracked_count
+      },
+      hint:(
+        if $ok then "review target valid: review the committed HEAD (codex --base sees a non-empty branch diff)."
+        elif $reason == "merge_base_unavailable" then "git diff <base>...HEAD cannot be computed (no merge base — orphan/unrelated history). rebase onto the review base so codex --base triple-dot scope is computable, then re-run."
+        elif $reason == "branch_diff_empty_and_dirty_worktree" then "nothing is committed since the review base and the worktree has pending edits — commit all intended changes, then re-run."
+        elif $reason == "branch_diff_empty" then "no committed changes since the review base — commit/amend intended changes before review, else codex --base sees an empty diff and vacuously approves."
+        elif $reason == "dirty_worktree" then "commit/amend or remove pending staged/unstaged/untracked changes so the reviewed HEAD matches the shipped tree, then re-run."
+        else "resolve the review base before review."
+        end
+      )
+    }'; then
+    rm -rf "$tmp_dir"
+    if [[ "$ok" == "true" ]]; then
+      return 0
+    fi
+    return 3
+  else
+    local status=$?
+    rm -rf "$tmp_dir"
+    return "$status"
+  fi
+}
+
 numstat_totals() {
   awk -F '\t' '
     BEGIN { insertions = 0; deletions = 0; files = 0 }
