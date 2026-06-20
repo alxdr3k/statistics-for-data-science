@@ -4,13 +4,13 @@ description: 현재 PR의 codex 리뷰를 기다리고 코멘트 수정 후 push
 ---
 <!-- my-skill:generated
 skill: review-loop
-base-sha256: 40166b1f883691b1e523292ab520ff687d168a51b7d6690f6fa1c6668ed4d56e
+base-sha256: 003aef58ebb16549e3fffe83dfa096bdf51402fc1da66cabbde24a6207173271
 overlay-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-output-sha256: 40166b1f883691b1e523292ab520ff687d168a51b7d6690f6fa1c6668ed4d56e
+output-sha256: 003aef58ebb16549e3fffe83dfa096bdf51402fc1da66cabbde24a6207173271
 do-not-edit: edit .codex/skill-overrides/review-loop.md instead
 -->
 
-현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복한 뒤 **pass 신호를 caller에게 인계한다.** 이 skill은 PR을 merge하지 않는다. merge 정책 적용과 PR land는 호출자(`/codex-loop`, `/run-team` orchestrator 등)가 별도로 수행한다.
+현재 작업 중인 PR에 대해 codex 리뷰를 기다리고, 코멘트가 달리면 수정 후 push. 통과 reaction까지 반복한 뒤 **pass 신호를 caller에게 인계한다.** 이 skill은 PR을 merge하지 않는다. merge 정책 적용과 PR land는 호출자(`/review-and-land`, `/run-team` orchestrator 등)가 별도로 수행한다.
 
 사용자에게 보이는 보고, feedback 정리, 질문은 한국어로 작성한다. 코드, 명령, 파일명, 원문 인용은 원문 언어를 유지한다.
 
@@ -322,7 +322,7 @@ drift 가드를 통과한 뒤, `mcp__github__unsubscribe_pr_activity { owner, re
 
 `wait-codex-review.sh`를 `--json` 또는 `CODEX_REVIEW_OUTPUT=json`으로 실행한다. exit 0과 함께 stdout에 `kind:"codex_review_observation"` JSON이 출력된다. 이 observation은 helper가 baseline 캡처와 동시에 캡처한 `reviewed_head_sha` 필드를 포함한다 — review-loop이 별도로 head SHA를 fetch할 필요가 없고 baseline과 SHA의 시점 불일치도 없다. review-loop은 exit 0을 받은 후 observation의 `reviewed_head_sha`를 `reviewed_head_sha` 로 채택한 뒤 위 "SHA drift 가드"를 적용한다. 가드를 통과하면 observation의 `repo`/`pr_number`/`baseline`/`reviewed_head_sha`와 pass 신호 종류를 합쳐 위 `review_loop_pass_signal` payload를 caller에게 emit한다. `signal_source`는 observation의 pass 신호 종류를 따른다 (reaction이면 `reaction`, pass-comment이면 `pass_comment`, 그 외 exit-zero이면 `exit_zero`). drift가 감지되면 helper를 새 baseline + 새 `reviewed_head_sha`로 재실행한다.
 
-review-loop은 PR을 merge하지 않는다. 후속 행동(checks 확인, merge 정책 적용, land 실행)은 호출자(`/codex-loop`, `/run-team`, 또는 사용자)가 결정한다.
+review-loop은 PR을 merge하지 않는다. 후속 행동(checks 확인, merge 정책 적용, land 실행)은 호출자(`/review-and-land`, `/run-team`, 또는 사용자)가 결정한다.
 
 worker context에서 호출됐다면 pass 인계가 review-loop의 정상 종료점이다. land 권한이 없는 worker는 여기서 더 진행하지 않고 작업 상태(위 pass payload 포함)를 orchestrator에게 보고한다.
 

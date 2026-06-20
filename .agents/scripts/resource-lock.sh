@@ -692,7 +692,7 @@ cmd_heartbeat() {
     > "$tmp"
   # DEC-040 round 3 F4 — tight pre-mv re-check. Race window between this
   # check and the mv is microseconds; cooperative-lock callers (run
-  # 5-minute cycles, codex-loop second-granular polling) tolerate this.
+  # 5-minute cycles, review-and-land second-granular polling) tolerate this.
   local premv_pid premv_nonce
   premv_pid="$(jq -r '.caller_pid' "$lock_path/holder.json" 2>/dev/null || echo "")"
   premv_nonce="$(jq -r '.nonce // empty' "$lock_path/holder.json" 2>/dev/null || echo "")"

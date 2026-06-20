@@ -3029,7 +3029,7 @@ cmd_whose_turn() {
 cmd_watch() {
   # Foreground readiness poller. Re-computes whose-turn every --interval
   # seconds and exits as soon as the watched agent owns the next protocol
-  # turn. Exit codes follow the codex-loop polling shape so interactive
+  # turn. Exit codes follow the review-and-land polling shape so interactive
   # turns (or a poll-only ScheduleWakeup re-run) can branch on them:
   #   0  ready — it is --agent's turn now (details on stdout)
   #   2  timeout — turn did not arrive within --timeout

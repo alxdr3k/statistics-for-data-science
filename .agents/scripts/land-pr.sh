@@ -771,7 +771,7 @@ if [[ "${LAND_PR_ADMIN_FALLBACK:-}" == "1" ]] && (( auto == 0 )); then
 fi
 
 # Base-branch worktree conflict structured envelope. Distinct from the
-# generic merge_failed so callers (orchestrator, codex-loop, operators)
+# generic merge_failed so callers (orchestrator, review-and-land, operators)
 # can route the recovery automatically. The recovery hint lists the
 # manual steps an operator needs: (a) re-run gh pr merge from a cwd that
 # is NOT a git worktree at all (or from the base-branch worktree itself),
