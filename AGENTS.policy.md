@@ -349,11 +349,14 @@ agent to perform new work. If the wake-up agent receives a prompt
 that crosses into the Forbidden list, it MUST stop and surface the
 ambiguity rather than proceed.
 
-`.claude/commands/codex-loop.md` describes the codex review wait
-loop, which is the canonical "polling + retry" wake-up shape and
-honours this policy by design (foreground helper, no background
-mutation, exit codes drive interactive turns). Other scheduled
-agents must follow the same shape.
+The canonical "polling + retry" wake-up shape is the code-review wait
+loop: a foreground helper polls for the reviewer's verdict, mutates
+nothing in the background, and returns an exit code that the next
+interactive turn acts on. Other scheduled agents must follow the same
+shape. This policy states the shape rather than naming a command file
+because the agent toolchain that ships those commands is installed
+per-user, not per-repo — a repo-relative pointer would dangle in every
+adopter that does not carry that toolchain.
 
 ## Extraction tasks
 

@@ -128,10 +128,12 @@ Soft warning (LLM-judge, advisory only):
 
 ## Enforcement (5-defense stack)
 
-The intended primary defense is the dev-cycle helper structured path (see
-`.codex/skills/dev-cycle/SKILL.md` finish-cycle-json) — it becomes the
-active primary once ADR-0003 PHASE-2 lands; until then it is planned, not
-implemented. Until PHASE-2 ships, the canonical rule (the `AGENTS.policy.md`
+The intended primary defense is the development-cycle helper's structured
+finish payload (the `finish-cycle-json` step of the agent toolchain's run
+cycle; ADR-0003 wrote this as the then-current `dev-cycle` skill, since
+absorbed into the `run` cycle and installed per-user rather than per-repo)
+— it becomes the active primary once ADR-0003 PHASE-2 lands; until then it
+is planned, not implemented. Until PHASE-2 ships, the canonical rule (the `AGENTS.policy.md`
 authority gate plus the schema in this file, layer 2) and the agent's
 self-review checkpoint (layer 5) carry the load. Layers 3-4 (agent-dialog
 kind, optional Claude Code Stop hook) are tracked in ADR-0003 as later phases.
